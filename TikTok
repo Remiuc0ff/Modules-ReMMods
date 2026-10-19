@@ -5,7 +5,7 @@ import os
 import re
 import yt_dlp
 
-# dev: @remiuc
+# Пэзда блин.
 
 @loader.tds
 class TikTokMod(loader.Module):
