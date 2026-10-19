@@ -5,8 +5,6 @@ import os
 import re
 import yt_dlp
 
-# Пэзда блин.
-
 @loader.tds
 class TikTokMod(loader.Module):
     """Модуль для скачивания видео из TikTok"""
