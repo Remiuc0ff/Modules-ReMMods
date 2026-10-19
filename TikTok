@@ -12,22 +12,22 @@ class TikTokMod(loader.Module):
     """Модуль для скачивания видео из TikTok"""
     strings = {
         "name": "TikTok",
-        "downloading": "<tg-emoji emoji-id=5215679757366089921>🥳</tg-emoji>Скачиваю видео...",
-        "downloading_audio": "<tg-emoji emoji-id=5215679757366089921>🥳</tg-emoji>Скачиваю аудио...",
-        "uploading": "<tg-emoji emoji-id=5215679757366089921>🥳</tg-emoji> Загружаю...",
-        "uploading_audio": "<tg-emoji emoji-id=5215679757366089921>🥳</tg-emoji>Загружаю аудио...",
-        "error": "❌ Ошибка: {}",
-        "no_link": "❌ Укажите ссылку на TikTok\nИспользование: ,tt <ссылка>",
-        "no_link_audio": "❌ Укажите ссылку на TikTok\nИспользование: ,ttsound <ссылка>",
+        "downloading": "<tg-emoji emoji-id=5449640880315962057>📥</tg-emoji> Скачиваю видео...",
+        "downloading_audio": "<tg-emoji emoji-id=5328224536297084553>🎵</tg-emoji> Скачиваю аудио...",
+        "uploading": "<tg-emoji emoji-id=5447644880024345524>📤</tg-emoji> Загружаю...",
+        "uploading_audio": "<tg-emoji emoji-id=5330366810233636737>🎶</tg-emoji> Загружаю аудио...",
+        "error": "<tg-emoji emoji-id=5449553655167261144>❌</tg-emoji> Ошибка: {}",
+        "no_link": "<tg-emoji emoji-id=5447410651080395751>🔗</tg-emoji> Укажите ссылку на TikTok\nИспользование: ,tt <ссылка>",
+        "no_link_audio": "<tg-emoji emoji-id=5447410651080395751>🔗</tg-emoji> Укажите ссылку на TikTok\nИспользование: ,ttsound <ссылка>",
     }
     strings_ru = {
-        "downloading": "⬇️ Скачиваю видео...",
-        "downloading_audio": "<tg-emoji emoji-id=5215679757366089921>🥳</tg-emoji> Скачиваю аудио...",
-        "uploading": "📤 Загружаю...",
-        "uploading_audio": "<tg-emoji emoji-id=5215679757366089921>🥳</tg-emoji> Загружаю аудио...",
-        "error": "❌ Ошибка: {}",
-        "no_link": "❌ Укажите ссылку на TikTok\nИспользование: ,tt <ссылка>",
-        "no_link_audio": "❌ Укажите ссылку на TikTok\nИспользование: ,ttsound <ссылка>",
+        "downloading": "<tg-emoji emoji-id=5449640880315962057>📥</tg-emoji> Скачиваю видео...",
+        "downloading_audio": "<tg-emoji emoji-id=5328224536297084553>🎵</tg-emoji> Скачиваю аудио...",
+        "uploading": "<tg-emoji emoji-id=5447644880024345524>📤</tg-emoji> Загружаю...",
+        "uploading_audio": "<tg-emoji emoji-id=5330366810233636737>🎶</tg-emoji> Загружаю аудио...",
+        "error": "<tg-emoji emoji-id=5449553655167261144>❌</tg-emoji> Ошибка: {}",
+        "no_link": "<tg-emoji emoji-id=5447410651080395751>🔗</tg-emoji> Укажите ссылку на TikTok\nИспользование: ,tt <ссылка>",
+        "no_link_audio": "<tg-emoji emoji-id=5447410651080395751>🔗</tg-emoji> Укажите ссылку на TikTok\nИспользование: ,ttsound <ссылка>",
     }
 
     def _sanitize_filename(self, name: str) -> str:
@@ -99,17 +99,17 @@ class TikTokMod(loader.Module):
             
             await utils.answer(status, self.strings["uploading"])
             
-            # Чек на реплай
+        
             reply_id = message.reply_to_msg_id if message.reply_to_msg_id else message.id
             
-            with open(filename, 'rb') as f:
+           with open(filename, 'rb') as f:
                 await message.client.send_file(
                     message.chat_id,
                     f,
-                    caption=f"🎬 TikTok Video\n{url}",
+                    caption=f"<tg-emoji emoji-id=5449640880315962057>📱</tg-emoji> TikTok Video\nОригинальная ссылка: {url}",
+                    parse_mode="html",
                     reply_to=reply_id
                 )
-            
             os.remove(filename)
             await status.delete()
             
@@ -137,7 +137,7 @@ class TikTokMod(loader.Module):
             
             await status.edit(self.strings["uploading_audio"])
             
-            # Чек на реплай
+        
             reply_id = message.reply_to_msg_id if message.reply_to_msg_id else message.id
             
             with open(filename, 'rb') as f:
