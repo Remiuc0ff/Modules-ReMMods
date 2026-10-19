@@ -1,0 +1,153 @@
+from herokutl.types import Message
+from .. import loader, utils
+import os
+import re
+import yt_dlp
+
+@loader.tds
+class TikTokMod(loader.Module):
+    """Модуль для скачивания видео и аудио с ТТ по ссылке"""
+    strings = {
+        "name": "TikTok",
+        "downloading": "<tg-emoji emoji-id=5215679757366089921>🥳</tg-emoji> Скачиваю видео...",
+        "downloading_audio": "<tg-emoji emoji-id=5215679757366089921>🥳</tg-emoji> Скачиваю аудио...",
+        "uploading": "<tg-emoji emoji-id=5215679757366089921>🥳</tg-emoji> Загружаю...",
+        "uploading_audio": "<tg-emoji emoji-id=5215679757366089921>🥳</tg-emoji> Загружаю аудио...",
+        "error": "❌ Ошибка: {}",
+        "no_link": "❌ Укажите ссылку на TikTok\nИспользование: .tt <ссылка> или реплай на сообщение со ссылкой",
+        "no_link_audio": "❌ Укажите ссылку на TikTok\nИспользование: .ttsound <ссылка> или реплай на сообщение со ссылкой",
+    }
+    strings_ru = strings
+
+    def _sanitize_filename(self, name: str) -> str:
+        """Clean filename from invalid characters"""
+        name = re.sub(r'[<>:"/\\|?*]', '', name)
+        name = name.strip()
+        if len(name) > 100:
+            name = name[:100]
+        return name if name else "tiktok_media"
+
+    async def _get_url(self, message: Message) -> str:
+        """Get URL from command args or reply"""
+        args = utils.get_args_raw(message)
+        if args:
+            return args.strip()
+        
+        reply = await message.get_reply_message()
+        if reply and reply.text:
+            urls = re.findall(r'https?://(?:vt\.|vm\.|www\.)?tiktok\.com/\S+', reply.text)
+            if urls:
+                return urls[0]
+        
+        return None
+
+    async def _download(self, url: str, extract_audio: bool = False) -> tuple[str, str]:
+        """Download video or audio from TikTok, returns (filename, title)"""
+        temp_file = "temp_tiktok"
+        
+        if extract_audio:
+            opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': f'{temp_file}.%(ext)s',
+                'quiet': True,
+                'no_warnings': True,
+                'extractaudio': True,
+                'audioformat': 'mp3',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+            }
+        else:
+            opts = {
+                'format': 'best[ext=mp4]/best',
+                'outtmpl': f'{temp_file}.%(ext)s',
+                'quiet': True,
+                'no_warnings': True,
+            }
+            
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            title = info.get('title', 'TikTok Video')
+            
+            ext = 'mp3' if extract_audio else 'mp4'
+            
+            for file in os.listdir('.'):
+                if file.startswith(temp_file):
+                    return file, title
+        return None, None
+
+    @loader.command(ru_doc="Скачать видео с TikTok")
+    async def ttcmd(self, message: Message):
+        """<link/reply> - Скачать видео с TikTok"""
+        url = await self._get_url(message)
+        if not url:
+            await utils.answer(message, self.strings("no_link", message))
+            return
+
+        # Получаем ID сообщения, на которое нужно ответить (исходное или наше)
+        reply = await message.get_reply_message()
+        reply_to_id = reply.id if reply else message.id
+
+        msg = await utils.answer(message, self.strings("downloading", message))
+        
+        try:
+            file_path, title = await self._download(url, extract_audio=False)
+            if not file_path:
+                raise Exception("Не удалось скачать видео")
+            
+            await utils.answer(msg, self.strings("uploading", message))
+            
+            # Отправляем файл с параметром reply_to
+            await message.client.send_file(
+                message.to_id, 
+                file_path, 
+                caption=title,
+                reply_to=reply_to_id
+            )
+            await msg.delete()
+            
+        except Exception as e:
+            await utils.answer(msg, self.strings("error", message).format(str(e)))
+        finally:
+            # Удаляем временный файл
+            if 'file_path' in locals() and file_path and os.path.exists(file_path):
+                os.remove(file_path)
+
+    @loader.command(ru_doc="Скачать звук с TikTok")
+    async def ttsoundcmd(self, message: Message):
+        """<link/reply> - Скачать звук с TikTok"""
+        url = await self._get_url(message)
+        if not url:
+            await utils.answer(message, self.strings("no_link_audio", message))
+            return
+
+        # Получаем ID сообщения, на которое нужно ответить (исходное или наше)
+        reply = await message.get_reply_message()
+        reply_to_id = reply.id if reply else message.id
+
+        msg = await utils.answer(message, self.strings("downloading_audio", message))
+        
+        try:
+            file_path, title = await self._download(url, extract_audio=True)
+            if not file_path:
+                raise Exception("Не удалось скачать аудио")
+            
+            await utils.answer(msg, self.strings("uploading_audio", message))
+            
+            # Отправляем файл с параметром reply_to
+            await message.client.send_file(
+                message.to_id, 
+                file_path, 
+                caption=title,
+                reply_to=reply_to_id
+            )
+            await msg.delete()
+            
+        except Exception as e:
+            await utils.answer(msg, self.strings("error", message).format(str(e)))
+        finally:
+            # Удаляем временный файл
+            if 'file_path' in locals() and file_path and os.path.exists(file_path):
+                os.remove(file_path)
