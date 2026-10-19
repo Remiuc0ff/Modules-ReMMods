@@ -5,9 +5,12 @@ import os
 import re
 import yt_dlp
 
+# Хуйло: @remiuc 
+# 🚀 Модуль для скачивания видео из TikTok - качай топовые видосы и треки по одной ссылке прямо в Телеграм! Никаких ботов с рекламой: просто кидаешь команду, и видео мгновенно прилетает в твой чат.
+
 @loader.tds
 class TikTokMod(loader.Module):
-    """Модуль для скачивания видео из TikTok"""
+    """Модуль для скачивания видео и аудио с ТТ по ссылке"""
     strings = {
         "name": "TikTok",
         "downloading": "<tg-emoji emoji-id=5449640880315962057>📥</tg-emoji> Скачиваю видео...",
@@ -97,10 +100,9 @@ class TikTokMod(loader.Module):
             
             await utils.answer(status, self.strings["uploading"])
             
-        
             reply_id = message.reply_to_msg_id if message.reply_to_msg_id else message.id
             
-           with open(filename, 'rb') as f:
+            with open(filename, 'rb') as f:
                 await message.client.send_file(
                     message.chat_id,
                     f,
@@ -108,6 +110,7 @@ class TikTokMod(loader.Module):
                     parse_mode="html",
                     reply_to=reply_id
                 )
+            
             os.remove(filename)
             await status.delete()
             
@@ -135,7 +138,6 @@ class TikTokMod(loader.Module):
             
             await status.edit(self.strings["uploading_audio"])
             
-        
             reply_id = message.reply_to_msg_id if message.reply_to_msg_id else message.id
             
             with open(filename, 'rb') as f:
