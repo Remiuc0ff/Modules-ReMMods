@@ -5,9 +5,6 @@ import os
 import re
 import yt_dlp
 
-# Хуйло: @remiuc 
-# 🚀 Модуль для скачивания видео из TikTok - качай топовые видосы и треки по одной ссылке прямо в Телеграм! Никаких ботов с рекламой: просто кидаешь команду, и видео мгновенно прилетает в твой чат.
-
 @loader.tds
 class TikTokMod(loader.Module):
     """Модуль для скачивания видео и аудио с ТТ по ссылке"""
@@ -81,8 +78,8 @@ class TikTokMod(loader.Module):
         return filename, title
 
     @loader.command(
-        ru_doc="Скачать видео из TikTok ",
-        en_doc="Download TikTok video "
+        ru_doc="Скачать видео из TikTok",
+        en_doc="Download TikTok video"
     )
     async def tt(self, message: Message):
         """Download TikTok video"""
