@@ -9,7 +9,7 @@ import yt_dlp
 
 @loader.tds
 class TikTokMod(loader.Module):
-    """🚀 Модуль для скачивания видео из TikTok"""
+    """Модуль для скачивания видео из TikTok"""
     strings = {
         "name": "TikTok",
         "downloading": "<tg-emoji emoji-id=5215679757366089921>🥳</tg-emoji>Скачиваю видео...",
