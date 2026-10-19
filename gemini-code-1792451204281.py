@@ -1,0 +1,135 @@
+# requires: telethon
+# meta developer: @remiuc
+
+from .. import loader, utils
+import asyncio
+import time
+from telethon.errors.rpcerrorlist import YouBlockedUserError
+
+@loader.tds
+class YtBotBypassMod(loader.Module):
+    """Мощное скачивание через бота с перехватом измененных сообщений и полной автоочисткой"""
+    strings = {"name": "YtBotBypass"}
+    __author__ = "@remiuc"
+    __version__ = (1, 0, 1)
+
+    async def _process_download(self, message, url, msg, target_format):
+        bot_username = "@SaveYoutubeBot"
+        seen_msg_ids = []
+        
+        try:
+            async with message.client.conversation(bot_username, timeout=30, exclusive=False) as conv:
+                sent_msg = await conv.send_message(url)
+                seen_msg_ids.append(sent_msg.id)
+                
+                response = await conv.get_response()
+                seen_msg_ids.append(response.id)
+                
+                if response.buttons:
+                    await utils.answer(msg, '<tg-emoji emoji-id="5411236022149219263">⚙️</tg-emoji> <b>Бот выдал меню. Выбираю качество...</b>')
+                    clicked = False
+                    
+                    formats_to_try = ["720", "1080", "480", "360", "240"] if target_format == "video" else ["mp3"]
+                    
+                    for fmt in formats_to_try:
+                        for row in response.buttons:
+                            for button in row:
+                                if fmt in button.text.lower():
+                                    await button.click()
+                                    clicked = True
+                                    await utils.answer(msg, f'<tg-emoji emoji-id="5411192149058289173">☁️</tg-emoji> <b>Нажал {fmt}p! Сканирую чат на наличие файла...</b>')
+                                    break
+                            if clicked: break
+                        if clicked: break
+                    
+                    if not clicked:
+                        for row in response.buttons:
+                            for button in row:
+                                btn_text = button.text.lower().replace("р", "p")
+                                if (target_format == "video" and "p" in btn_text) or (target_format == "audio" and "mp3" in btn_text):
+                                    await button.click()
+                                    clicked = True
+                                    await utils.answer(msg, '<tg-emoji emoji-id="5411192149058289173">☁️</tg-emoji> <b>Нажал запасную кнопку. Сканирую чат...</b>')
+                                    break
+                            if clicked: break
+
+                    if not clicked:
+                        await utils.answer(msg, '<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Не нашел подходящей кнопки.</b>')
+                        return
+                else:
+                    await utils.answer(msg, '<tg-emoji emoji-id="5411192149058289173">☁️</tg-emoji> <b>Меню нет, сканирую чат напрямую...</b>')
+
+                start_time = time.time()
+                while True:
+                    if time.time() - start_time > 300:
+                        await utils.answer(msg, '<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Таймаут. Бот не отдал файл.</b>')
+                        break
+                        
+                    try:
+                        new_resp = await conv.get_response(timeout=3)
+                        if new_resp:
+                            seen_msg_ids.append(new_resp.id)
+                            text = new_resp.text or ""
+                            if "ошибк" in text.lower() or "error" in text.lower() or "не найден" in text.lower() or "ограничен" in text.lower():
+                                await utils.answer(msg, f'<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Бот выдал ошибку:</b>\n{text}')
+                                return
+                    except asyncio.TimeoutError:
+                        pass
+                        
+                    msgs = await message.client.get_messages(bot_username, ids=seen_msg_ids)
+                    found = False
+                    for m in msgs:
+                        if m and m.media and (m.video or m.document or m.audio):
+                            await self._send_media(message, m, msg)
+                            found = True
+                            break
+                    
+                    if found:
+                        break
+
+        except YouBlockedUserError:
+            await utils.answer(msg, '<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Разблокируй @SaveYoutubeBot!</b>')
+        except Exception as e:
+            await utils.answer(msg, f'<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Ошибка модуля:</b> {str(e)}')
+        finally:
+            # АБСОЛЮТНАЯ ЗАЧИСТКА: Удаляем вообще все сообщения в чате с ботом
+            try:
+                async for m in message.client.iter_messages(bot_username, limit=50):
+                    await m.delete()
+            except Exception:
+                pass
+
+    async def _send_media(self, message, media_msg, msg):
+        """Гарантированная отправка файла через send_file"""
+        await utils.answer(msg, '<tg-emoji emoji-id="5330349014732802482">🚀</tg-emoji> <b>Файл перехвачен! Загружаю в чат...</b>')
+        
+        await message.client.send_file(
+            message.chat_id,
+            file=media_msg.media,
+            caption='<tg-emoji emoji-id="5332366494015715581">💎</tg-emoji> <b>Успешно загружено</b>',
+            reply_to=message.id
+        )
+        if msg.out:
+            await msg.delete()
+
+    async def ytcmd(self, message):
+        """<ссылка> - Скачать видео через бота-посредника"""
+        args = utils.get_args_raw(message)
+        if not args:
+            await utils.answer(message, '<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Укажи ссылку!</b>')
+            return
+            
+        msg = await utils.answer(message, '<tg-emoji emoji-id="5332688668102525212">⏳</tg-emoji> <b>Отправляю запрос...</b>')
+        msg = msg[0] if isinstance(msg, list) else msg
+        await self._process_download(message, args.strip(), msg, target_format="video")
+
+    async def ytaudiocmd(self, message):
+        """<ссылка> - Скачать аудио через бота-посредника"""
+        args = utils.get_args_raw(message)
+        if not args:
+            await utils.answer(message, '<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Укажи ссылку!</b>')
+            return
+            
+        msg = await utils.answer(message, '<tg-emoji emoji-id="5408850846421124323">🎵</tg-emoji> <b>Отправляю запрос...</b>')
+        msg = msg[0] if isinstance(msg, list) else msg
+        await self._process_download(message, args.strip(), msg, target_format="audio")
