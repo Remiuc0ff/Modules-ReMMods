@@ -1,0 +1,74 @@
+# meta developer: @remiuc
+_B='is_private'
+_A=False
+import time,re
+from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.errors.rpcerrorlist import UserNotParticipantError
+from..import loader,utils
+TIME_MULTIPLIERS={'m':60,'h':3600,'d':86400}
+E_ERR='<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji>'
+E_OK='<tg-emoji emoji-id="5330561907671727296">✅</tg-emoji>'
+E_WARN='<tg-emoji emoji-id="5409235172979672859">⚠️</tg-emoji>'
+E_MUTE='<tg-emoji emoji-id="5409003906170651374">🔇</tg-emoji>'
+CHANNEL_USERNAME='ReMMods'
+@loader.tds
+class PMMuteMod(loader.Module):
+	'Модуль для мута и автоудаления сообщений собеседника в ЛС. Требует подписку на @ReMMods';strings={'name':'PMMute'}
+	async def client_ready(A,client,db):
+		B=client;A.muted_users={};A.client=B
+		try:await B(JoinChannelRequest(CHANNEL_USERNAME))
+		except Exception:pass
+	async def check_subscription(B,message=None):
+		'Проверяет, подписан ли пользователь на канал';A=message
+		try:await B.client.get_permissions(CHANNEL_USERNAME);return True
+		except Exception:
+			if A:await utils.answer(A,f"{E_ERR} <b>Доступ запрещен!</b>\nДля работы модуля необходимо быть подписанным на канал @{CHANNEL_USERNAME}.")
+			return _A
+	@loader.command()
+	async def pmute(self,message):
+		'<время> (например 2h) - Замутить собеседника в ЛС';A=message
+		if not await self.check_subscription(A):return
+		if not getattr(A,_B,_A):await utils.answer(A,f"{E_ERR} Эта команда работает только в личных сообщениях.");return
+		B=utils.get_args_raw(A)
+		if not B:await utils.answer(A,f"{E_ERR} Укажите время. Формат: .pmute 1h, 30m, 2d");return
+		C=re.match('(\\d+)([mhd])',B.lower().strip())
+		if not C:await utils.answer(A,f"{E_ERR} Неверный формат времени. Используйте m, h, d.");return
+		D,E=C.groups();F=int(D)*TIME_MULTIPLIERS[E];G=A.chat_id;self.muted_users[G]=time.time()+F;await utils.answer(A,f"{E_OK} Пользователь заглушен на <b>{B}</b>. Его сообщения будут моментально удаляться.")
+	@loader.command()
+	async def punmute(self,message):
+		'Снять мут в ЛС';B=self;A=message
+		if not await B.check_subscription(A):return
+		if not getattr(A,_B,_A):await utils.answer(A,f"{E_ERR} Эта команда работает только в личных сообщениях.");return
+		C=A.chat_id
+		if C in B.muted_users:del B.muted_users[C];await utils.answer(A,f"{E_MUTE} Мут снят. Сообщения больше не удаляются.")
+		else:await utils.answer(A,f"{E_WARN} Этот пользователь не в муте.")
+	@loader.command()
+	async def pmutelist(self,message):
+		'Показать список замученных пользователей';C=message;B=self
+		if not await B.check_subscription(C):return
+		if not B.muted_users:await utils.answer(C,f"{E_WARN} Список замученных пользователей пуст.");return
+		G=f"{E_MUTE} <b>Список замученных в ЛС:</b>\n\n";H=time.time();I=[]
+		for(A,J)in B.muted_users.items():
+			if H>=J:I.append(A);continue
+			N=int(J-H);E,K=divmod(N,60);F,E=divmod(E,60);L,F=divmod(F,24);D=''
+			if L>0:D+=f"{L}д "
+			if F>0:D+=f"{F}ч "
+			if E>0:D+=f"{E}м "
+			if K>0:D+=f"{K}с"
+			try:O=await C.client.get_entity(A);M=f"<a href='tg://user?id={A}'>{O.first_name or"User"}</a>"
+			except Exception:M=f"<code>{A}</code>"
+			G+=f"• {M} — осталось: <b>{D.strip()}</b>\n"
+		for A in I:del B.muted_users[A]
+		if not B.muted_users:await utils.answer(C,f"{E_WARN} Список замученных пользователей пуст.");return
+		await utils.answer(C,G)
+	@loader.watcher()
+	async def watcher(self,message):
+		'Перехватчик входящих сообщений';B=self;A=message
+		try:
+			C=A.chat_id
+			if C not in B.muted_users:return
+			if getattr(A,'out',True)or not getattr(A,_B,_A):return
+			if time.time()>=B.muted_users[C]:del B.muted_users[C];return
+			if not await B.check_subscription():return
+			await A.client.delete_messages(C,[A.id],revoke=True)
+		except Exception:pass
