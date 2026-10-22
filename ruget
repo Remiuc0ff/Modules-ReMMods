@@ -2127,4 +2127,3 @@ class RemakeVoiceMod(loader.Module):
         chat_id, _ = await self._resolve_target(message)
         await self._leave_call(chat_id)
         await utils.answer(message, self.strings("left"))
-```<FollowUp label="Нужна помощь с загрузкой этого кода на твой хостинг?" query="Как правильно залить или обновить этот модуль на сервере, где работает юзербот?"/>
