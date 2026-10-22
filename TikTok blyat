@@ -2,11 +2,11 @@ from herokutl.types import Message
 from .. import loader, utils
 import os
 import re
-import yt_dlp
+import aiohttp
 
 @loader.tds
 class TikTokMod(loader.Module):
-    """Модуль для скачивания видео и аудио с ТТ по ссылке"""
+    """Модуль для скачивания видео и аудио с ТТ по ссылке (без yt-dlp)"""
     
     strings = {
         "name": "TikTok",
@@ -41,38 +41,35 @@ class TikTokMod(loader.Module):
         return None
 
     async def _download(self, url: str, extract_audio: bool = False) -> tuple[str, str]:
-        temp_file = "temp_tiktok"
+        api_url = "https://www.tikwm.com/api/"
         
-        if extract_audio:
-            opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': f'{temp_file}.%(ext)s',
-                'quiet': True,
-                'no_warnings': True,
-                'extractaudio': True,
-                'audioformat': 'mp3',
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }],
-            }
-        else:
-            opts = {
-                'format': 'best[ext=mp4]/best',
-                'outtmpl': f'{temp_file}.%(ext)s',
-                'quiet': True,
-                'no_warnings': True,
-            }
-            
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            title = info.get('title', 'TikTok Video')
-            
-            for file in os.listdir('.'):
-                if file.startswith(temp_file):
-                    return file, title
-        return None, None
+        async with aiohttp.ClientSession() as session:
+            async with session.post(api_url, data={"url": url}) as response:
+                json_data = await response.json()
+                
+                if json_data.get("code") != 0:
+                    return None, None
+                    
+                item = json_data.get("data", {})
+                title = item.get("title", "TikTok Video")
+                
+                if extract_audio:
+                    media_url = item.get("music")
+                    ext = "mp3"
+                else:
+                    media_url = item.get("play")
+                    ext = "mp4"
+                    
+                if not media_url:
+                    return None, None
+                    
+                temp_file = f"temp_tiktok.{ext}"
+                
+                async with session.get(media_url) as media_response:
+                    with open(temp_file, "wb") as f:
+                        f.write(await media_response.read())
+                        
+                return temp_file, title
 
     @loader.command(ru_doc="Скачать видео с TikTok")
     async def ttcmd(self, message: Message):
@@ -90,7 +87,7 @@ class TikTokMod(loader.Module):
         try:
             file_path, title = await self._download(url, extract_audio=False)
             if not file_path:
-                raise Exception("Не удалось скачать видео")
+                raise Exception("Не удалось получить видео (Возможно, неверная ссылка или закрытый аккаунт)")
             
             await utils.answer(msg, self.strings("uploading", message))
             
@@ -123,7 +120,7 @@ class TikTokMod(loader.Module):
         try:
             file_path, title = await self._download(url, extract_audio=True)
             if not file_path:
-                raise Exception("Не удалось скачать аудио")
+                raise Exception("Не удалось получить аудио (Возможно, неверная ссылка)")
             
             await utils.answer(msg, self.strings("uploading_audio", message))
             
