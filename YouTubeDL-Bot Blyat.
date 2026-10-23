@@ -5,13 +5,84 @@ from .. import loader, utils
 import asyncio
 import time
 from telethon.errors.rpcerrorlist import YouBlockedUserError
+from telethon.tl.functions.messages import ImportChatInviteRequest
+from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
+from telethon.tl.functions.account import UpdateNotifySettingsRequest
+from telethon.tl.types import InputPeerNotifySettings
 
 @loader.tds
 class YtBotBypassMod(loader.Module):
-    """Мощное скачивание через бота с перехватом измененных сообщений и полной автоочисткой"""
+    """Мощное скачивание через бота с обходом спонсоров, авто-архивацией и умной очисткой"""
     strings = {"name": "YtBotBypass"}
     __author__ = "@remiuc"
-    __version__ = (1, 1, 0)
+    __version__ = (1, 2, 0)
+
+    async def client_ready(self, client, db):
+        self.db = db
+
+    async def _handle_sponsors(self, message, response, conv, msg):
+        """Проверка и обход спонсорских подписок"""
+        if not response.buttons:
+            return response
+
+        urls_to_join = []
+        check_btn = None
+
+        for row in response.buttons:
+            for btn in row:
+                if btn.url:
+                    urls_to_join.append(btn.url)
+                if btn.text and ("проверить" in btn.text.lower() or "check" in btn.text.lower() or "подписался" in btn.text.lower()):
+                    check_btn = btn
+
+        if check_btn and urls_to_join:
+            await utils.answer(msg, '<tg-emoji emoji-id="5411236022149219263">⚙️</tg-emoji> <b>Обнаружены спонсоры! Настраиваю подписки...</b>')
+            
+            # Отписываемся от старых
+            old_sponsors = self.get("sponsors", [])
+            for old_channel in old_sponsors:
+                try:
+                    await message.client(LeaveChannelRequest(old_channel))
+                except Exception:
+                    pass
+            
+            new_sponsors = []
+            
+            # Подписываемся на новых
+            for url in urls_to_join:
+                try:
+                    chat_id = None
+                    if "+" in url or "joinchat" in url:
+                        hash_str = url.split("/")[-1].replace("+", "")
+                        updates = await message.client(ImportChatInviteRequest(hash_str))
+                        chat_id = updates.chats[0].id
+                    else:
+                        entity = url.split("/")[-1]
+                        updates = await message.client(JoinChannelRequest(entity))
+                        chat_id = updates.chats[0].id
+
+                    if chat_id:
+                        new_sponsors.append(chat_id)
+                        # Кидаем в архив (ID папки архива: 1)
+                        await message.client.edit_folder(chat_id, 1)
+                        # Мутим навсегда
+                        await message.client(UpdateNotifySettingsRequest(
+                            peer=chat_id,
+                            settings=InputPeerNotifySettings(mute_until=2147483647)
+                        ))
+                except Exception:
+                    pass
+            
+            # Сохраняем новых спонсоров в базу, чтобы удалить их при следующем скачивании
+            self.set("sponsors", new_sponsors)
+            
+            await check_btn.click()
+            await asyncio.sleep(2)
+            
+            # Ждем обновленное меню после проверки подписки
+            return await conv.get_response()
+            
+        return response
 
     async def _process_download(self, message, url, msg, target_format):
         bot_username = "@SaveYoutubeBot"
@@ -24,6 +95,11 @@ class YtBotBypassMod(loader.Module):
                 
                 response = await conv.get_response()
                 seen_msg_ids.append(response.id)
+
+                # Проходим обход спонсоров
+                response = await self._handle_sponsors(message, response, conv, msg)
+                if response and response.id not in seen_msg_ids:
+                    seen_msg_ids.append(response.id)
                 
                 if response.buttons:
                     await utils.answer(msg, '<tg-emoji emoji-id="5411236022149219263">⚙️</tg-emoji> <b>Бот выдал меню. Выбираю формат...</b>')
@@ -32,7 +108,7 @@ class YtBotBypassMod(loader.Module):
                     if target_format == "video":
                         formats_to_try = ["720", "1080", "480", "360", "240"]
                     elif target_format == "audio":
-                        formats_to_try = ["mp3", "мр3"] # Учитываем латиницу и кириллицу
+                        formats_to_try = ["mp3", "мр3"]
                     elif target_format == "preview":
                         formats_to_try = ["превью"]
                     
@@ -42,7 +118,7 @@ class YtBotBypassMod(loader.Module):
                                 if fmt in button.text.lower():
                                     await button.click()
                                     clicked = True
-                                    await utils.answer(msg, f'<tg-emoji emoji-id="5411192149058289173">☁️</tg-emoji> <b>Нажал {fmt}! Сканирую чат на наличие файла...</b>')
+                                    await utils.answer(msg, f'<tg-emoji emoji-id="5411192149058289173">☁️</tg-emoji> <b>Нажал {fmt}! Ожидаю файл...</b>')
                                     break
                             if clicked: break
                         if clicked: break
@@ -56,12 +132,12 @@ class YtBotBypassMod(loader.Module):
                                    (target_format == "preview" and "превью" in btn_text):
                                     await button.click()
                                     clicked = True
-                                    await utils.answer(msg, '<tg-emoji emoji-id="5411192149058289173">☁️</tg-emoji> <b>Нажал запасную кнопку. Сканирую чат...</b>')
+                                    await utils.answer(msg, '<tg-emoji emoji-id="5411192149058289173">☁️</tg-emoji> <b>Нажал запасную кнопку. Ожидаю файл...</b>')
                                     break
                             if clicked: break
 
                     if not clicked:
-                        await utils.answer(msg, '<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Не нашел подходящей кнопки.</b>')
+                        await utils.answer(msg, '<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Не нашел подходящей кнопки формата.</b>')
                         return
                 else:
                     await utils.answer(msg, '<tg-emoji emoji-id="5411192149058289173">☁️</tg-emoji> <b>Меню нет, сканирую чат напрямую...</b>')
@@ -86,25 +162,24 @@ class YtBotBypassMod(loader.Module):
                     msgs = await message.client.get_messages(bot_username, ids=seen_msg_ids)
                     found = False
                     for m in msgs:
-                        # Добавлена поддержка m.photo для превью
                         if m and m.media and (m.video or m.document or m.audio or getattr(m, 'photo', None)):
                             await self._send_media(message, m, msg)
                             found = True
                             break
                     
+                    # УДАЛЕНИЕ СООБЩЕНИЙ СТРОГО ПОСЛЕ УСПЕШНОГО СКАЧИВАНИЯ
                     if found:
+                        try:
+                            async for old_m in message.client.iter_messages(bot_username, limit=50):
+                                await old_m.delete()
+                        except Exception:
+                            pass
                         break
 
         except YouBlockedUserError:
             await utils.answer(msg, '<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Разблокируй @SaveYoutubeBot!</b>')
         except Exception as e:
             await utils.answer(msg, f'<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Ошибка модуля:</b> {str(e)}')
-        finally:
-            try:
-                async for m in message.client.iter_messages(bot_username, limit=50):
-                    await m.delete()
-            except Exception:
-                pass
 
     async def _send_media(self, message, media_msg, msg):
         """Гарантированная отправка файла через send_file"""
