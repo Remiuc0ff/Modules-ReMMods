@@ -11,7 +11,7 @@ class YtBotBypassMod(loader.Module):
     """Мощное скачивание через бота с перехватом измененных сообщений и полной автоочисткой"""
     strings = {"name": "YtBotBypass"}
     __author__ = "@remiuc"
-    __version__ = (1, 0, 1)
+    __version__ = (1, 1, 0)
 
     async def _process_download(self, message, url, msg, target_format):
         bot_username = "@SaveYoutubeBot"
@@ -26,10 +26,15 @@ class YtBotBypassMod(loader.Module):
                 seen_msg_ids.append(response.id)
                 
                 if response.buttons:
-                    await utils.answer(msg, '<tg-emoji emoji-id="5411236022149219263">⚙️</tg-emoji> <b>Бот выдал меню. Выбираю качество...</b>')
+                    await utils.answer(msg, '<tg-emoji emoji-id="5411236022149219263">⚙️</tg-emoji> <b>Бот выдал меню. Выбираю формат...</b>')
                     clicked = False
                     
-                    formats_to_try = ["720", "1080", "480", "360", "240"] if target_format == "video" else ["mp3"]
+                    if target_format == "video":
+                        formats_to_try = ["720", "1080", "480", "360", "240"]
+                    elif target_format == "audio":
+                        formats_to_try = ["mp3", "мр3"] # Учитываем латиницу и кириллицу
+                    elif target_format == "preview":
+                        formats_to_try = ["превью"]
                     
                     for fmt in formats_to_try:
                         for row in response.buttons:
@@ -37,7 +42,7 @@ class YtBotBypassMod(loader.Module):
                                 if fmt in button.text.lower():
                                     await button.click()
                                     clicked = True
-                                    await utils.answer(msg, f'<tg-emoji emoji-id="5411192149058289173">☁️</tg-emoji> <b>Нажал {fmt}p! Сканирую чат на наличие файла...</b>')
+                                    await utils.answer(msg, f'<tg-emoji emoji-id="5411192149058289173">☁️</tg-emoji> <b>Нажал {fmt}! Сканирую чат на наличие файла...</b>')
                                     break
                             if clicked: break
                         if clicked: break
@@ -46,7 +51,9 @@ class YtBotBypassMod(loader.Module):
                         for row in response.buttons:
                             for button in row:
                                 btn_text = button.text.lower().replace("р", "p")
-                                if (target_format == "video" and "p" in btn_text) or (target_format == "audio" and "mp3" in btn_text):
+                                if (target_format == "video" and "p" in btn_text) or \
+                                   (target_format == "audio" and "mp3" in btn_text) or \
+                                   (target_format == "preview" and "превью" in btn_text):
                                     await button.click()
                                     clicked = True
                                     await utils.answer(msg, '<tg-emoji emoji-id="5411192149058289173">☁️</tg-emoji> <b>Нажал запасную кнопку. Сканирую чат...</b>')
@@ -79,7 +86,8 @@ class YtBotBypassMod(loader.Module):
                     msgs = await message.client.get_messages(bot_username, ids=seen_msg_ids)
                     found = False
                     for m in msgs:
-                        if m and m.media and (m.video or m.document or m.audio):
+                        # Добавлена поддержка m.photo для превью
+                        if m and m.media and (m.video or m.document or m.audio or getattr(m, 'photo', None)):
                             await self._send_media(message, m, msg)
                             found = True
                             break
@@ -92,7 +100,6 @@ class YtBotBypassMod(loader.Module):
         except Exception as e:
             await utils.answer(msg, f'<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Ошибка модуля:</b> {str(e)}')
         finally:
-            # АБСОЛЮТНАЯ ЗАЧИСТКА: Удаляем вообще все сообщения в чате с ботом
             try:
                 async for m in message.client.iter_messages(bot_username, limit=50):
                     await m.delete()
@@ -133,3 +140,14 @@ class YtBotBypassMod(loader.Module):
         msg = await utils.answer(message, '<tg-emoji emoji-id="5408850846421124323">🎵</tg-emoji> <b>Отправляю запрос...</b>')
         msg = msg[0] if isinstance(msg, list) else msg
         await self._process_download(message, args.strip(), msg, target_format="audio")
+
+    async def ytpreviewcmd(self, message):
+        """<ссылка> - Скачать превью видео через бота-посредника"""
+        args = utils.get_args_raw(message)
+        if not args:
+            await utils.answer(message, '<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Укажи ссылку!</b>')
+            return
+            
+        msg = await utils.answer(message, '<tg-emoji emoji-id="5332688668102525212">🖼</tg-emoji> <b>Отправляю запрос на превью...</b>')
+        msg = msg[0] if isinstance(msg, list) else msg
+        await self._process_download(message, args.strip(), msg, target_format="preview")
