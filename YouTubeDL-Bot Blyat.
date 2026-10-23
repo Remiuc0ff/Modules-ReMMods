@@ -5,17 +5,18 @@ from .. import loader, utils
 import asyncio
 import time
 from telethon.errors.rpcerrorlist import YouBlockedUserError
+from telethon.errors import UserNotParticipantError, UserAlreadyParticipantError
 from telethon.tl.functions.messages import ImportChatInviteRequest
-from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
+from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest, GetParticipantRequest
 from telethon.tl.functions.account import UpdateNotifySettingsRequest
 from telethon.tl.types import InputPeerNotifySettings
 
 @loader.tds
 class YtBotBypassMod(loader.Module):
-    """Мощное скачивание через бота с обходом спонсоров, авто-понижением качества и умной очисткой"""
+    """Мощное скачивание через бота с безопасной авто-отпиской и умной очисткой"""
     strings = {"name": "YtBotBypass"}
     __author__ = "@remiuc"
-    __version__ = (1, 4, 0)
+    __version__ = (1, 8, 0)
 
     async def client_ready(self, client, db):
         self.db = db
@@ -35,14 +36,7 @@ class YtBotBypassMod(loader.Module):
                     check_btn = btn
 
         if check_btn and urls_to_join:
-            await utils.answer(msg, '<tg-emoji emoji-id="5411236022149219263">⚙️</tg-emoji> <b>Обнаружены спонсоры! Настраиваю подписки...</b>')
-            
-            old_sponsors = self.get("sponsors", [])
-            for old_channel in old_sponsors:
-                try:
-                    await message.client(LeaveChannelRequest(old_channel))
-                except Exception:
-                    pass
+            await utils.answer(msg, '<tg-emoji emoji-id="5411236022149219263">⚙️</tg-emoji> <b>Обнаружены спонсоры! Проверяю и настраиваю временные подписки...</b>')
             
             new_sponsors = []
             
@@ -51,15 +45,31 @@ class YtBotBypassMod(loader.Module):
                     chat_id = None
                     if "+" in url or "joinchat" in url:
                         hash_str = url.split("/")[-1].replace("+", "")
-                        updates = await message.client(ImportChatInviteRequest(hash_str))
-                        chat_id = updates.chats[0].id
+                        try:
+                            updates = await message.client(ImportChatInviteRequest(hash_str))
+                            if updates.chats:
+                                chat_id = updates.chats[0].id
+                                new_sponsors.append(chat_id)
+                        except UserAlreadyParticipantError:
+                            pass
                     else:
                         entity = url.split("/")[-1]
-                        updates = await message.client(JoinChannelRequest(entity))
-                        chat_id = updates.chats[0].id
+                        already_in = False
+                        try:
+                            await message.client(GetParticipantRequest(channel=entity, participant='me'))
+                            already_in = True
+                        except UserNotParticipantError:
+                            pass
+                        except Exception:
+                            pass
+                        
+                        if not already_in:
+                            updates = await message.client(JoinChannelRequest(entity))
+                            if updates.chats:
+                                chat_id = updates.chats[0].id
+                                new_sponsors.append(chat_id)
 
-                    if chat_id:
-                        new_sponsors.append(chat_id)
+                    if chat_id and chat_id in new_sponsors:
                         await message.client.edit_folder(chat_id, 1)
                         await message.client(UpdateNotifySettingsRequest(
                             peer=chat_id,
@@ -68,7 +78,7 @@ class YtBotBypassMod(loader.Module):
                 except Exception:
                     pass
             
-            self.set("sponsors", new_sponsors)
+            self.set("current_sponsors", new_sponsors)
             
             await check_btn.click()
             await asyncio.sleep(2)
@@ -79,6 +89,7 @@ class YtBotBypassMod(loader.Module):
 
     async def _process_download(self, message, url, msg, target_format):
         bot_username = "@SaveYoutubeBot"
+        self.set("current_sponsors", []) 
         
         try:
             async with message.client.conversation(bot_username, timeout=30, exclusive=False) as conv:
@@ -86,7 +97,7 @@ class YtBotBypassMod(loader.Module):
                 response = await conv.get_response()
                 response = await self._handle_sponsors(message, response, conv, msg)
                 
-                menu_msg_id = response.id # Запоминаем ID меню, чтобы не скачивать превью оттуда
+                menu_msg_id = response.id
                 
                 if response.buttons:
                     await utils.answer(msg, '<tg-emoji emoji-id="5411236022149219263">⚙️</tg-emoji> <b>Бот выдал меню. Выбираю формат...</b>')
@@ -145,7 +156,7 @@ class YtBotBypassMod(loader.Module):
                             if clicked: break
 
                     if not clicked:
-                        await utils.answer(msg, '<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Не нашел подходящей кнопки или все форматы слишком большие.</b>')
+                        await utils.answer(msg, '<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Не нашел подходящей кнопки.</b>')
                         return
                 else:
                     await utils.answer(msg, '<tg-emoji emoji-id="5411192149058289173">☁️</tg-emoji> <b>Меню нет, сканирую чат напрямую...</b>')
@@ -168,15 +179,31 @@ class YtBotBypassMod(loader.Module):
                         
                     msgs = await message.client.get_messages(bot_username, limit=5)
                     found = False
+                    
                     for m in msgs:
-                        if m.id <= menu_msg_id: 
-                            continue # Игнорируем сообщение с меню и его превью
+                        # Пропускаем старые сообщения до появления меню
+                        if m.id < menu_msg_id: 
+                            continue
                             
-                        if m and m.media:
+                        if m and getattr(m, 'media', None):
                             is_valid = False
-                            if target_format == "video" and (m.video or m.document): is_valid = True
-                            elif target_format == "audio" and (m.audio or m.document): is_valid = True
-                            elif target_format == "preview" and getattr(m, 'photo', None): is_valid = True
+                            
+                            # Файл - это либо совершенно новое сообщение от бота, либо меню, у которого удалили кнопки
+                            is_new_msg = m.id > menu_msg_id
+                            is_edited_menu = (m.id == menu_msg_id and not getattr(m, 'buttons', None))
+                            
+                            if target_format == "video" and (getattr(m, 'video', None) or getattr(m, 'document', None)):
+                                if is_new_msg or is_edited_menu:
+                                    is_valid = True
+                            
+                            elif target_format == "audio" and (getattr(m, 'audio', None) or getattr(m, 'voice', None) or getattr(m, 'document', None)):
+                                if is_new_msg or is_edited_menu:
+                                    is_valid = True
+                            
+                            # Поддержка как обычного фото, так и файла (document) для превью
+                            elif target_format == "preview" and (getattr(m, 'photo', None) or getattr(m, 'document', None)):
+                                if is_new_msg or is_edited_menu:
+                                    is_valid = True
                             
                             if is_valid:
                                 await self._send_media(message, m, msg)
@@ -195,6 +222,16 @@ class YtBotBypassMod(loader.Module):
             await utils.answer(msg, '<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Разблокируй @SaveYoutubeBot!</b>')
         except Exception as e:
             await utils.answer(msg, f'<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Ошибка модуля:</b> {str(e)}')
+        finally:
+            sponsors = self.get("current_sponsors", [])
+            if sponsors:
+                await asyncio.sleep(1)
+                for sp in sponsors:
+                    try:
+                        await message.client(LeaveChannelRequest(sp))
+                    except Exception:
+                        pass
+            self.set("current_sponsors", [])
 
     async def _send_media(self, message, media_msg, msg):
         await utils.answer(msg, '<tg-emoji emoji-id="5330349014732802482">🚀</tg-emoji> <b>Файл перехвачен! Загружаю в чат...</b>')
