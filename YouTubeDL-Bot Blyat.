@@ -7,7 +7,7 @@ import time
 from telethon.errors.rpcerrorlist import YouBlockedUserError
 from telethon.errors import UserNotParticipantError, UserAlreadyParticipantError
 from telethon.tl.functions.messages import ImportChatInviteRequest
-from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest, GetParticipantRequest
+from telethon.tl.functions.channels import JoinChannelRequest, GetParticipantRequest
 from telethon.tl.functions.account import UpdateNotifySettingsRequest
 from telethon.tl.types import InputPeerNotifySettings
 
@@ -16,7 +16,7 @@ class YtBotBypassMod(loader.Module):
     """Мощное скачивание через бота с безопасной авто-отпиской и умной очисткой"""
     strings = {"name": "YtBotBypass"}
     __author__ = "@remiuc"
-    __version__ = (1, 8, 1)
+    __version__ = (1, 8, 3)
 
     async def client_ready(self, client, db):
         self.db = db
@@ -90,12 +90,31 @@ class YtBotBypassMod(loader.Module):
     async def _process_download(self, message, url, msg, target_format):
         bot_username = "@SaveYoutubeBot"
         self.set("current_sponsors", []) 
+        clicked_lang_msg_ids = set()
         
         try:
             async with message.client.conversation(bot_username, timeout=30, exclusive=False) as conv:
                 sent_msg = await conv.send_message(url)
                 response = await conv.get_response()
                 response = await self._handle_sponsors(message, response, conv, msg)
+                
+                if response.buttons and "язык" in (response.text or "").lower():
+                    lang_clicked = False
+                    for row in response.buttons:
+                        for btn in row:
+                            if "ru" in btn.text.lower() or "рус" in btn.text.lower():
+                                await btn.click()
+                                lang_clicked = True
+                                clicked_lang_msg_ids.add(response.id)
+                                break
+                        if lang_clicked: break
+                    
+                    if lang_clicked:
+                        await utils.answer(msg, '<tg-emoji emoji-id="5411236022149219263">⚙️</tg-emoji> <b>Выбираю русскую озвучку...</b>')
+                        await asyncio.sleep(2)
+                        msgs = await message.client.get_messages(bot_username, limit=1)
+                        if msgs:
+                            response = msgs[0]
                 
                 menu_msg_id = response.id
                 
@@ -181,14 +200,27 @@ class YtBotBypassMod(loader.Module):
                     found = False
                     
                     for m in msgs:
-                        # Пропускаем старые сообщения до появления меню
                         if m.id < menu_msg_id: 
                             continue
                             
-                        # Игнорируем уведомление о безлимите/закрепе, чтобы не перехватить его как файл
                         text_lower = (m.message or "").lower()
                         if "безлимит" in text_lower or "закрепи" in text_lower:
                             continue
+
+                        if m.buttons and "язык" in text_lower and m.id not in clicked_lang_msg_ids:
+                            lang_clicked = False
+                            for row in m.buttons:
+                                for btn in row:
+                                    if "ru" in btn.text.lower() or "рус" in btn.text.lower():
+                                        await btn.click()
+                                        await utils.answer(msg, '<tg-emoji emoji-id="5411236022149219263">⚙️</tg-emoji> <b>Автоматически выбрана русская озвучка...</b>')
+                                        clicked_lang_msg_ids.add(m.id)
+                                        lang_clicked = True
+                                        break
+                                if lang_clicked: break
+                            if lang_clicked:
+                                await asyncio.sleep(1)
+                                continue
                             
                         if m and getattr(m, 'media', None):
                             is_valid = False
@@ -228,10 +260,10 @@ class YtBotBypassMod(loader.Module):
         finally:
             sponsors = self.get("current_sponsors", [])
             if sponsors:
-                await asyncio.sleep(1)
+                await asyncio.sleep(2)
                 for sp in sponsors:
                     try:
-                        await message.client(LeaveChannelRequest(sp))
+                        await message.client.delete_dialog(sp)
                     except Exception:
                         pass
             self.set("current_sponsors", [])
@@ -240,7 +272,7 @@ class YtBotBypassMod(loader.Module):
         await utils.answer(msg, '<tg-emoji emoji-id="5330349014732802482">🚀</tg-emoji> <b>Файл перехвачен! Загружаю в чат...</b>')
         await message.client.send_file(
             message.chat_id,
-            file=media_msg,  # Передаем сам объект сообщения вместо media_msg.media
+            file=media_msg,
             caption='<tg-emoji emoji-id="5332366494015715581">💎</tg-emoji> <b>Успешно загружено</b>',
             reply_to=message.id
         )
