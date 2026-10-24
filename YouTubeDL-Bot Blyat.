@@ -17,32 +17,31 @@ class YtBotBypassMod(loader.Module):
     """Мощное скачивание через бота с безопасной авто-отпиской и умной очисткой"""
     strings = {"name": "YtBotBypass"}
     __author__ = "@remiuc"
-    __version__ = (1, 8, 5)
+    __version__ = (1, 8, 7)
+
+    def __init__(self):
+        self.config = loader.ModuleConfig(
+            "bot_username", "@SaveYoutubeBot", "Юзернейм бота для скачивания (@SaveYoutubeBot или @youtubabot)"
+        )
 
     async def client_ready(self, client, db):
         self.db = db
-        # Используем юзернейм, который был на скриншотах
-        self.bot_username = "@youtubabot" 
 
     async def _process_download(self, message, url, msg, target_format):
-        bot_username = self.bot_username
+        bot_username = self.config["bot_username"]
         sponsors = [] 
         processed_msgs = set()
         
         try:
-            # Отправляем сообщение напрямую без блокирующего conv
             sent_msg = await message.client.send_message(bot_username, url)
             menu_msg = None
             
-            # 1. Интеллектуальный поиск меню (до 20 секунд)
             for _ in range(20):
                 msgs = await message.client.get_messages(bot_username, limit=5)
                 for m in msgs:
-                    # Игнорируем старые сообщения
                     if m.id <= sent_msg.id:
                         continue
                         
-                    # Проверка на ошибку от бота
                     text_lower = (m.message or "").lower()
                     if "ошибк" in text_lower or "не найден" in text_lower:
                         await utils.answer(msg, f'<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Ошибка бота:</b>\n{m.message}')
@@ -51,7 +50,6 @@ class YtBotBypassMod(loader.Module):
                     if not m.buttons:
                         continue
 
-                    # A. Перехват кнопок спонсоров
                     is_sponsor = False
                     urls_to_join = []
                     check_btn = None
@@ -99,9 +97,8 @@ class YtBotBypassMod(loader.Module):
                         await check_btn.click()
                         processed_msgs.add(m.id)
                         await asyncio.sleep(2)
-                        break # Сбрасываем цикл для загрузки новых сообщений от бота
+                        break 
 
-                    # B. Перехват выбора языка
                     if "язык" in text_lower and m.id not in processed_msgs:
                         lang_clicked = False
                         for row in m.buttons:
@@ -117,7 +114,6 @@ class YtBotBypassMod(loader.Module):
                             await asyncio.sleep(1.5)
                             break
 
-                    # C. Поиск главного меню с форматами
                     is_main_menu = False
                     for row in m.buttons:
                         for btn in row:
@@ -133,12 +129,9 @@ class YtBotBypassMod(loader.Module):
                     break
                 await asyncio.sleep(1)
 
-            # 2. Обработка форматов
             clicked = False
-            menu_msg_id = sent_msg.id
             
             if menu_msg:
-                menu_msg_id = menu_msg.id
                 await utils.answer(msg, '<tg-emoji emoji-id="5411236022149219263">⚙️</tg-emoji> <b>Меню получено. Выбираю формат...</b>')
                 
                 if target_format == "video":
@@ -188,50 +181,59 @@ class YtBotBypassMod(loader.Module):
                  await utils.answer(msg, '<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>В меню нет нужного формата!</b>')
                  return
 
-            # 3. Ожидание и скачивание файла
             start_time = time.time()
             while True:
                 if time.time() - start_time > 300:
                     await utils.answer(msg, '<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Таймаут. Бот не отдал файл.</b>')
                     break
                     
-                msgs = await message.client.get_messages(bot_username, limit=5)
+                msgs = await message.client.get_messages(bot_username, limit=10)
                 found = False
                 
                 for m in msgs:
-                    if m.id <= menu_msg_id:
+                    # Разрешаем перехват любого файла, отправленного ПОСЛЕ нашей ссылки
+                    if m.id <= sent_msg.id:
                         continue
                         
                     text_lower = (m.message or "").lower()
-                    # Игнорируем промежуточные статусы
                     if "безлимит" in text_lower or "закрепи" in text_lower or "ожидайте" in text_lower or "загрузка" in text_lower:
                         continue
                         
-                    # На случай, если бот запросил язык уже после выбора качества
-                    if m.buttons and "язык" in text_lower and m.id not in processed_msgs:
-                        lang_clicked = False
+                    # Обрабатываем кнопки "проверить подписку", если они вылезли после выбора качества
+                    if m.buttons and m.id not in processed_msgs:
+                        action_taken = False
                         for row in m.buttons:
                             for btn in row:
-                                if "ru" in btn.text.lower() or "рус" in btn.text.lower():
+                                btn_text = (btn.text or "").lower()
+                                if "ru" in btn_text or "рус" in btn_text:
                                     await btn.click()
                                     await utils.answer(msg, '<tg-emoji emoji-id="5411236022149219263">⚙️</tg-emoji> <b>Автоматически выбрана русская озвучка...</b>')
-                                    processed_msgs.add(m.id)
-                                    lang_clicked = True
+                                    action_taken = True
                                     break
-                            if lang_clicked: break
-                        if lang_clicked:
-                            await asyncio.sleep(1)
+                                elif "проверить" in btn_text or "check" in btn_text or "подписался" in btn_text:
+                                    await btn.click()
+                                    action_taken = True
+                                    break
+                            if action_taken: break
+                        if action_taken:
+                            processed_msgs.add(m.id)
+                            await asyncio.sleep(1.5)
                             continue
 
-                    # Проверяем наличие медиафайла
                     if m and getattr(m, 'media', None):
+                        # Игнорируем превью обычных ссылок
+                        if hasattr(m.media, 'webpage') and getattr(m.media, 'webpage', None):
+                            continue
+                            
                         is_valid = False
                         if target_format == "video" and (getattr(m, 'video', None) or getattr(m, 'document', None)):
                             is_valid = True
                         elif target_format == "audio" and (getattr(m, 'audio', None) or getattr(m, 'voice', None) or getattr(m, 'document', None)):
                             is_valid = True
                         elif target_format == "preview" and (getattr(m, 'photo', None) or getattr(m, 'document', None)):
-                            is_valid = True
+                            # Чтобы скрипт не перехватил рекламный фото-баннер вместо превью
+                            if "доступ к боту" not in text_lower:
+                                is_valid = True
                             
                         if is_valid:
                             await self._send_media(message, m, msg)
@@ -252,7 +254,6 @@ class YtBotBypassMod(loader.Module):
         except Exception as e:
             await utils.answer(msg, f'<tg-emoji emoji-id="5408830797513784663">🚫</tg-emoji> <b>Ошибка модуля:</b> {str(e)}')
         finally:
-            # Гарантированная отписка от каналов
             if sponsors:
                 await asyncio.sleep(2)
                 for sp in sponsors:
