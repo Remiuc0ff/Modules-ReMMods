@@ -16,7 +16,7 @@ class YtBotBypassMod(loader.Module):
     """Мощное скачивание через бота с безопасной авто-отпиской и умной очисткой"""
     strings = {"name": "YtBotBypass"}
     __author__ = "@remiuc"
-    __version__ = (1, 8, 0)
+    __version__ = (1, 8, 1)
 
     async def client_ready(self, client, db):
         self.db = db
@@ -185,10 +185,14 @@ class YtBotBypassMod(loader.Module):
                         if m.id < menu_msg_id: 
                             continue
                             
+                        # Игнорируем уведомление о безлимите/закрепе, чтобы не перехватить его как файл
+                        text_lower = (m.message or "").lower()
+                        if "безлимит" in text_lower or "закрепи" in text_lower:
+                            continue
+                            
                         if m and getattr(m, 'media', None):
                             is_valid = False
                             
-                            # Файл - это либо совершенно новое сообщение от бота, либо меню, у которого удалили кнопки
                             is_new_msg = m.id > menu_msg_id
                             is_edited_menu = (m.id == menu_msg_id and not getattr(m, 'buttons', None))
                             
@@ -200,7 +204,6 @@ class YtBotBypassMod(loader.Module):
                                 if is_new_msg or is_edited_menu:
                                     is_valid = True
                             
-                            # Поддержка как обычного фото, так и файла (document) для превью
                             elif target_format == "preview" and (getattr(m, 'photo', None) or getattr(m, 'document', None)):
                                 if is_new_msg or is_edited_menu:
                                     is_valid = True
@@ -237,7 +240,7 @@ class YtBotBypassMod(loader.Module):
         await utils.answer(msg, '<tg-emoji emoji-id="5330349014732802482">🚀</tg-emoji> <b>Файл перехвачен! Загружаю в чат...</b>')
         await message.client.send_file(
             message.chat_id,
-            file=media_msg.media,
+            file=media_msg,  # Передаем сам объект сообщения вместо media_msg.media
             caption='<tg-emoji emoji-id="5332366494015715581">💎</tg-emoji> <b>Успешно загружено</b>',
             reply_to=message.id
         )
