@@ -1,0 +1,648 @@
+# meta developer: @space_modules, @remiuc, @DmitriReMM
+# Name: VoiceModRemake
+# meta pic: https://github.com/Remiuc0ff/png-modules/raw/refs/heads/main/Remmods.jpeg
+# meta banner: https://github.com/Remiuc0ff/png-modules/raw/refs/heads/main/Remmods.jpeg
+# meta fhsdesc: голосовой чат, музыка, видео
+# meta tags: voice, music, audio, video
+# meta license: AGPL-3.0
+# scope: heroku
+# packages: ffmpeg
+# requires: yt-dlp py-tgcalls
+
+__version__ = (1, 0, 9)
+
+import asyncio
+import builtins
+import contextlib
+import importlib
+import importlib.machinery
+import importlib.util
+import inspect
+import logging
+import os
+import shutil
+import site
+import sys
+import tempfile
+import uuid
+from typing import Any, Dict, List, Optional
+
+from telethon.tl.types import Message
+from .. import loader, utils
+from ..inline.types import InlineCall
+
+logger = logging.getLogger(__name__)
+
+def _ensure_site_packages():
+    home = os.path.expanduser("~")
+    py_ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    candidates = [
+        f"/root/.local/lib/{py_ver}/site-packages",
+        os.path.join(home, ".local", "lib", py_ver, "site-packages"),
+    ]
+    for p in candidates:
+        if os.path.isdir(p):
+            with contextlib.suppress(Exception):
+                site.addsitedir(p)
+            if p not in sys.path:
+                sys.path.insert(0, p)
+
+_ensure_site_packages()
+
+HAS_PYTGCALLS = False
+PyTgCallsClass = None
+MediaStreamClass = None
+AudioPipedClass = None
+AudioVideoPipedClass = None
+
+def _fix_heroku_import_hook():
+    orig_import = builtins.__import__
+    if getattr(orig_import, "_voicemod_fixed", False):
+        return
+    def _fixed_import(name, *args, **kwargs):
+        level = kwargs.get("level", args[3] if len(args) >= 4 else 0)
+        if (level > 0 and name.startswith("telethon")) or (
+            name.startswith("telethon") and name != "telethon" and not name.startswith("telethon.")
+        ):
+            return importlib.__import__(name, *args, **kwargs)
+        return orig_import(name, *args, **kwargs)
+    _fixed_import._voicemod_fixed = True
+    builtins.__import__ = _fix_import
+
+def _try_import_pytgcalls() -> bool:
+    global HAS_PYTGCALLS, PyTgCallsClass, MediaStreamClass, AudioPipedClass, AudioVideoPipedClass
+    _fix_heroku_import_hook()
+    try:
+        from pytgcalls import PyTgCalls
+        PyTgCallsClass = PyTgCalls
+        HAS_PYTGCALLS = True
+        
+        m = importlib.import_module("pytgcalls.types")
+        MediaStreamClass = getattr(m, "MediaStream", None)
+        AudioPipedClass = getattr(m, "AudioPiped", None)
+        AudioVideoPipedClass = getattr(m, "AudioVideoPiped", None)
+        return True
+    except Exception:
+        return False
+
+_try_import_pytgcalls()
+
+@loader.tds
+class VoiceModRemake(loader.Module):
+    """Облегченный модуль для воспроизведения музыки в голосовых чатах."""
+
+    strings = {
+        "name": "VoiceModRemake",
+        "no_args": "<b>[VoiceModRemake]</b> ❌ Укажите ссылку, поисковый запрос или ответьте на аудио/видео!",
+        "searching": "<b>[VoiceModRemake]</b> 🔍 Поиск и обработка трека...",
+        "playing": (
+            "<b>[VoiceModRemake] 🎧 Сейчас играет:</b>\n"
+            "🎵 <b>Трек:</b> <code>{title}</code>\n"
+            "⏱ <b>Длительность:</b> <code>{duration}</code>{effect}\n"
+            "📊 <b>В очереди:</b> <code>{queue_len}</code>"
+        ),
+        "queued": "<b>[VoiceModRemake] 📥 Добавлено в очередь (#{pos}):</b>\n🎵 <code>{title}</code>",
+        "paused": "<b>[VoiceModRemake]</b> ⏸ Воспроизведение приостановлено.",
+        "resumed": "<b>[VoiceModRemake]</b> ▶️ Воспроизведение возобновлено.",
+        "muted": "<b>[VoiceModRemake]</b> 🔇 Микрофон заглушен.",
+        "unmuted": "<b>[VoiceModRemake]</b> 🔈 Микрофон включен.",
+        "stopped": "<b>[VoiceModRemake]</b> ⏹ Остановлено, очередь очищена.",
+        "joined": "<b>[VoiceModRemake]</b> 🎙 Подключился к голосовому чату.",
+        "left": "<b>[VoiceModRemake]</b> 🚪 Покинул голосовой чат.",
+        "not_joined": "<b>[VoiceModRemake]</b> ❌ Бот не в голосовом чате.",
+        "empty_queue": "<b>[VoiceModRemake]</b> 📭 Очередь пуста.",
+        "repeat_on": "<b>[VoiceModRemake]</b> 🔂 Повтор трека включён.",
+        "repeat_off": "<b>[VoiceModRemake]</b> 🔁 Повтор трека выключен.",
+        "cleared": "<b>[VoiceModRemake]</b> 🧹 Временная папка успешно очищена от файлов!",
+        "error": "<b>[VoiceModRemake] ⚠️ Ошибка:</b> <code>{err}</code>",
+        "btn_pause": "⏸ Пауза/Плей",
+        "btn_mute": "🔇 Звук (Вкл/Выкл)",
+        "btn_skip": "⏭ Пропуск",
+        "btn_stop": "⏹ Стоп",
+        "btn_repeat_on": "🔂 Повтор: ВКЛ",
+        "btn_repeat_off": "🔁 Повтор: ВЫКЛ"
+    }
+
+    def __init__(self):
+        self._temp_dir = tempfile.mkdtemp(prefix="heroku_voicemod_")
+        self._queue: Dict[int, List[Dict[str, Any]]] = {}
+        self._current: Dict[int, Dict[str, Any]] = {}
+        self._muted: Dict[int, bool] = {}
+        self._paused: Dict[int, bool] = {}
+        self._repeat: Dict[int, bool] = {}
+        self._speed: Dict[int, str] = {}
+        self._player_msgs: Dict[int, Message] = {}
+        self._timers: Dict[int, asyncio.Task] = {}
+        self._tgcalls: Any = None
+        self._expected_leave: set = set()
+
+    async def client_ready(self, client=None, db=None):
+        self._client = client
+        if HAS_PYTGCALLS:
+            try:
+                self._tgcalls = PyTgCallsClass(self._client)
+                start_res = self._tgcalls.start()
+                if inspect.isawaitable(start_res):
+                    await start_res
+            except Exception as e:
+                logger.error(f"[VoiceModRemake] Ошибка PyTgCalls: {e}")
+
+    async def on_unload(self):
+        for task in self._timers.values():
+            task.cancel()
+        for chat_id in list(self._current.keys()):
+            await self._leave_call(chat_id)
+        shutil.rmtree(self._temp_dir, ignore_errors=True)
+
+    def _get_pref(self):
+        try:
+            return self.get_prefix()
+        except Exception:
+            return "."
+
+    def _format_duration(self, seconds: Optional[int]) -> str:
+        if not seconds: return "Стрим"
+        m, s = divmod(int(seconds), 60)
+        h, m = divmod(m, 60)
+        return f"{h:02d}:{m:02d}:{s:02d}" if h > 0 else f"{m:02d}:{s:02d}"
+
+    def _get_marked_chat_id(self, obj: Any) -> int:
+        if isinstance(obj, int):
+            if 0 < obj <= 1000000000: return -obj
+            elif obj > 1000000000: return -1000000000000 - obj
+            return obj
+        try:
+            import telethon.utils as tl_utils
+            return tl_utils.get_peer_id(obj)
+        except Exception:
+            return getattr(obj, "chat_id", 0)
+
+    async def _resolve_target(self, message: Message) -> int:
+        args = utils.get_args_raw(message)
+        if args:
+            target = args.split(maxsplit=1)[0]
+            if target.startswith("-") or target.isdigit() or target.startswith("@"):
+                try:
+                    target_val = int(target) if target.lstrip("-").isdigit() else target
+                    entity = await self._client.get_entity(target_val)
+                    return self._get_marked_chat_id(entity)
+                except Exception: pass
+        chat_id = getattr(message, "chat_id", None)
+        if chat_id: return self._get_marked_chat_id(chat_id)
+        return self._get_marked_chat_id(message)
+
+    async def _extract_track_info(self, query: str) -> Dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        def _yt_extract():
+            import yt_dlp
+            with yt_dlp.YoutubeDL({"format": "bestaudio/best", "quiet": True, "default_search": "ytsearch"}) as ydl:
+                info = ydl.extract_info(query if "http" in query else f"ytsearch1:{query}", download=False)
+                if "entries" in info: info = info["entries"][0]
+                return {
+                    "title": info.get("title", "Неизвестно"),
+                    "duration": info.get("duration", 0),
+                    "url": info.get("url"),
+                    "webpage_url": info.get("webpage_url", query),
+                    "is_video": False
+                }
+        return await loop.run_in_executor(None, _yt_extract)
+
+    async def _apply_speed_effect(self, input_source: str, speed: str, is_video: bool) -> str:
+        if speed == "normal":
+            return input_source
+        
+        ext = "mp4" if is_video else "mp3"
+        out_file = os.path.join(self._temp_dir, f"fx_{speed}_{uuid.uuid4().hex[:8]}.{ext}")
+        
+        if speed == "slowed":
+            v_pts = "1.17647"
+            a_filter = "atempo=0.85"
+        else:
+            v_pts = "0.83333"
+            a_filter = "atempo=1.2"
+
+        cmd = ["ffmpeg", "-y", "-i", input_source]
+        
+        if is_video:
+            # Безопасные и синхронизированные фильтры для видео и аудио без рассинхрона
+            cmd.extend([
+                "-filter:v", f"setpts={v_pts}*PTS",
+                "-filter:a", a_filter,
+                "-r", "30",
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-async", "1",
+                "-vsync", "cfr"
+            ])
+        else:
+            cmd.extend([
+                "-filter:a", a_filter,
+                "-c:a", "libmp3lame"
+            ])
+            
+        cmd.append(out_file)
+        
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+            if proc.returncode == 0 and os.path.exists(out_file):
+                return out_file
+        except Exception as e:
+            logger.error(f"[VoiceModRemake] FFmpeg effect error: {e}")
+        return input_source
+
+    async def _track_timer(self, chat_id: int, track: Dict[str, Any]):
+        dur = track.get("duration", 0)
+        if dur <= 0:
+            return
+
+        speed = self._speed.get(chat_id, "normal")
+        effective_dur = dur
+        if speed == "slowed":
+            effective_dur = int(dur / 0.85)
+        elif speed == "speedup":
+            effective_dur = int(dur / 1.2)
+
+        slept = 0
+        while slept < effective_dur + 1:
+            await asyncio.sleep(1)
+            current = self._current.get(chat_id)
+            if not current or current.get("title") != track.get("title"):
+                return
+            if not self._paused.get(chat_id, False):
+                slept += 1
+
+        current = self._current.get(chat_id)
+        if current and current.get("title") == track.get("title"):
+            if self._repeat.get(chat_id, False):
+                try:
+                    if track.get("webpage_url") and not track.get("file_path"):
+                        try:
+                            new_info = await self._extract_track_info(track["webpage_url"])
+                            track["url"] = new_info.get("url", track.get("url"))
+                        except: pass
+                    
+                    await self._play_stream(chat_id, track)
+                    
+                    old_msg = self._player_msgs.get(chat_id)
+                    if old_msg:
+                        with contextlib.suppress(Exception):
+                            await self.inline.form(
+                                message=old_msg, 
+                                text=self._format_now(chat_id), 
+                                reply_markup=self._get_player_buttons(chat_id)
+                            )
+                except Exception as e:
+                    logger.error(f"[VoiceModRemake] Ошибка прямого автоповтора: {e}")
+            else:
+                await self._handle_track_end(chat_id)
+
+    async def _play_stream(self, chat_id: int, track: Dict[str, Any]):
+        self._current[chat_id] = track
+        self._paused[chat_id] = False
+        self._muted[chat_id] = False
+        
+        stream_source = track.get("url") or track.get("file_path")
+        speed = self._speed.get(chat_id, "normal")
+        is_video = track.get("is_video", False)
+
+        if speed != "normal":
+            fx_key = f"{speed}_path"
+            if not track.get(fx_key) or not os.path.exists(track[fx_key]):
+                track[fx_key] = await self._apply_speed_effect(stream_source, speed, is_video)
+            stream_source = track[fx_key]
+
+        if is_video and AudioVideoPipedClass:
+            try: stream = AudioVideoPipedClass(stream_source)
+            except Exception: stream = stream_source
+        elif MediaStreamClass:
+            try: stream = MediaStreamClass(stream_source)
+            except Exception: stream = stream_source
+        elif AudioPipedClass:
+            try: stream = AudioPipedClass(stream_source)
+            except Exception: stream = stream_source
+        else:
+            stream = stream_source
+
+        if hasattr(self._tgcalls, "play"):
+            await self._tgcalls.play(chat_id, stream)
+        elif hasattr(self._tgcalls, "join_group_call"):
+            try: await self._tgcalls.join_group_call(chat_id, stream)
+            except Exception: await self._tgcalls.change_stream(chat_id, stream)
+        self._expected_leave.discard(chat_id)
+
+        if chat_id in self._timers:
+            self._timers[chat_id].cancel()
+        self._timers[chat_id] = asyncio.create_task(self._track_timer(chat_id, track))
+
+    async def _handle_track_end(self, chat_id: int):
+        if chat_id in self._expected_leave: return
+        self._current.pop(chat_id, None)
+        
+        queue = self._queue.get(chat_id, [])
+        if queue:
+            next_track = queue.pop(0)
+            try:
+                await self._play_stream(chat_id, next_track)
+                old_msg = self._player_msgs.get(chat_id)
+                if old_msg:
+                    with contextlib.suppress(Exception):
+                        await self.inline.form(
+                            message=old_msg, 
+                            text=self._format_now(chat_id), 
+                            reply_markup=self._get_player_buttons(chat_id)
+                        )
+            except Exception as e:
+                logger.error(f"[VoiceModRemake] Ошибка следующего трека: {e}")
+        else:
+            await self._leave_call(chat_id)
+            old_msg = self._player_msgs.get(chat_id)
+            if old_msg:
+                with contextlib.suppress(Exception):
+                    await old_msg.edit(text=self.strings("stopped"), reply_markup=None)
+
+    async def _leave_call(self, chat_id: int):
+        self._expected_leave.add(chat_id)
+        if chat_id in self._timers:
+            self._timers[chat_id].cancel()
+            self._timers.pop(chat_id, None)
+            
+        if self._tgcalls:
+            with contextlib.suppress(Exception):
+                if hasattr(self._tgcalls, "leave_call"): await self._tgcalls.leave_call(chat_id)
+                elif hasattr(self._tgcalls, "leave_group_call"): await self._tgcalls.leave_group_call(chat_id)
+                
+        self._queue.pop(chat_id, [])
+        self._current.pop(chat_id, None)
+        self._paused.pop(chat_id, None)
+        self._muted.pop(chat_id, None)
+        self._speed.pop(chat_id, None)
+        
+        old_msg = self._player_msgs.pop(chat_id, None)
+        if old_msg:
+            with contextlib.suppress(Exception):
+                await old_msg.edit(text=self.strings("stopped"), reply_markup=None)
+
+    def _get_player_buttons(self, chat_id: int):
+        is_repeat = self._repeat.get(chat_id, False)
+        speed = self._speed.get(chat_id, "normal")
+        
+        if speed == "slowed":
+            speed_text = "🐢 Slowed"
+        elif speed == "speedup":
+            speed_text = "🐇 SpeedUp"
+        else:
+            speed_text = "🚀 Скор: Норм"
+
+        return [
+            [
+                {"text": self.strings("btn_pause"), "callback": self._cb_toggle_play, "args": (chat_id,)},
+                {"text": self.strings("btn_mute"), "callback": self._cb_toggle_mute, "args": (chat_id,)}
+            ],
+            [
+                {"text": self.strings("btn_skip"), "callback": self._cb_skip, "args": (chat_id,)},
+                {"text": self.strings("btn_stop"), "callback": self._cb_stop, "args": (chat_id,)}
+            ],
+            [
+                {"text": self.strings("btn_repeat_on") if is_repeat else self.strings("btn_repeat_off"), "callback": self._cb_toggle_repeat, "args": (chat_id,)},
+                {"text": speed_text, "callback": self._cb_toggle_speed, "args": (chat_id,)}
+            ]
+        ]
+
+    async def _cb_toggle_play(self, call: InlineCall, chat_id: int):
+        is_paused = self._paused.get(chat_id, False)
+        if self._tgcalls:
+            func = getattr(self._tgcalls, "resume" if is_paused else "pause")
+            await func(chat_id)
+        self._paused[chat_id] = not is_paused
+        await call.edit(self._format_now(chat_id), reply_markup=self._get_player_buttons(chat_id))
+
+    async def _cb_toggle_mute(self, call: InlineCall, chat_id: int):
+        is_muted = self._muted.get(chat_id, False)
+        if self._tgcalls:
+            func = getattr(self._tgcalls, "unmute" if is_muted else "mute")
+            await func(chat_id)
+        self._muted[chat_id] = not is_muted
+        await call.edit(self._format_now(chat_id), reply_markup=self._get_player_buttons(chat_id))
+
+    async def _cb_skip(self, call: InlineCall, chat_id: int):
+        old_msg = self._player_msgs.pop(chat_id, None)
+        if old_msg:
+            with contextlib.suppress(Exception):
+                await old_msg.delete()
+        await self._handle_track_end(chat_id)
+
+    async def _cb_stop(self, call: InlineCall, chat_id: int):
+        await self._leave_call(chat_id)
+        await call.edit(self.strings("stopped"))
+
+    async def _cb_toggle_repeat(self, call: InlineCall, chat_id: int):
+        self._repeat[chat_id] = not self._repeat.get(chat_id, False)
+        await call.edit(self._format_now(chat_id), reply_markup=self._get_player_buttons(chat_id))
+
+    async def _cb_toggle_speed(self, call: InlineCall, chat_id: int):
+        curr_speed = self._speed.get(chat_id, "normal")
+        if curr_speed == "normal":
+            new_speed = "slowed"
+        elif curr_speed == "slowed":
+            new_speed = "speedup"
+        else:
+            new_speed = "normal"
+            
+        self._speed[chat_id] = new_speed
+        
+        curr = self._current.get(chat_id)
+        if curr:
+            await call.edit("<b>[VoiceModRemake]</b> ⚙️ <i>Применяю эффект, перезапускаю...</i>", reply_markup=None)
+            await self._play_stream(chat_id, curr)
+            await call.edit(self._format_now(chat_id), reply_markup=self._get_player_buttons(chat_id))
+        else:
+            await call.edit(self._format_now(chat_id), reply_markup=self._get_player_buttons(chat_id))
+
+    def _format_now(self, chat_id: int) -> str:
+        curr = self._current.get(chat_id)
+        if not curr: return self.strings("empty_queue")
+        
+        speed = self._speed.get(chat_id, "normal")
+        effect_txt = ""
+        if speed == "slowed":
+            effect_txt = "\n💨 <b>Эффект:</b> <code>🐢 Slowed</code>"
+        elif speed == "speedup":
+            effect_txt = "\n💨 <b>Эффект:</b> <code>🐇 Speed Up</code>"
+            
+        return self.strings("playing").format(
+            title=curr["title"],
+            duration=self._format_duration(curr.get("duration")),
+            queue_len=len(self._queue.get(chat_id, [])),
+            effect=effect_txt
+        )
+
+    @loader.command(ru_doc="- Очистить временную папку загрузок модуля для освобождения места на диске")
+    async def vclear(self, message: Message):
+        """Команда для очистки папки загрузок (решает проблему [Errno 28] No space left on device)"""
+        try:
+            shutil.rmtree(self._temp_dir, ignore_errors=True)
+            os.makedirs(self._temp_dir, exist_ok=True)
+            await utils.answer(message, self.strings("cleared"))
+        except Exception as e:
+            await utils.answer(message, self.strings("error").format(err=str(e)))
+
+    @loader.command(ru_doc="[чат] <ссылка/поиск/реплай> - Включить или добавить трек в очередь")
+    async def vplay(self, message: Message):
+        chat_id = await self._resolve_target(message)
+        args = utils.get_args_raw(message)
+        reply = await message.get_reply_message()
+        
+        has_media = (reply and getattr(reply, "media", None)) or getattr(message, "media", None)
+        
+        if not args and not has_media:
+            return await utils.answer(message, self.strings("no_args"))
+
+        msg = await utils.answer(message, self.strings("searching"))
+        track = None
+        
+        target_media = reply if (reply and getattr(reply, "media", None)) else (message if getattr(message, "media", None) else None)
+
+        if target_media:
+            is_video = getattr(target_media, "video", False) or getattr(target_media, "video_note", False)
+            ext = ".mp4" if is_video else ".mp3"
+            temp_file = os.path.join(self._temp_dir, f"dl_{uuid.uuid4().hex[:8]}{ext}")
+            
+            try:
+                await target_media.download_media(file=temp_file)
+            except OSError as e:
+                if e.errno == 28:
+                    shutil.rmtree(self._temp_dir, ignore_errors=True)
+                    os.makedirs(self._temp_dir, exist_ok=True)
+                    try:
+                        await target_media.download_media(file=temp_file)
+                    except Exception as inner_e:
+                        return await utils.answer(msg, self.strings("error").format(err=f"Недостаточно места на диске (No space left on device): {inner_e}"))
+                else:
+                    raise e
+
+            track = {
+                "title": target_media.file.name if hasattr(target_media, "file") and getattr(target_media.file, "name", None) else "Медиафайл",
+                "duration": getattr(target_media.file, "duration", 0) if hasattr(target_media, "file") else 0,
+                "file_path": temp_file,
+                "is_video": is_video
+            }
+        else:
+            parts = args.split(maxsplit=1)
+            if parts and (parts[0].startswith("-") or parts[0].isdigit() or parts[0].startswith("@")):
+                query = parts[1] if len(parts) > 1 else ""
+            else:
+                query = args
+
+            if not query:
+                return await utils.answer(msg, self.strings("no_args"))
+
+            try: track = await self._extract_track_info(query)
+            except Exception as e: return await utils.answer(msg, self.strings("error").format(err=str(e)))
+
+        if chat_id in self._current:
+            self._queue.setdefault(chat_id, []).append(track)
+            return await utils.answer(msg, self.strings("queued").format(pos=len(self._queue[chat_id]), title=track["title"]))
+
+        try:
+            await self._play_stream(chat_id, track)
+            
+            old_player = self._player_msgs.get(chat_id)
+            if old_player and old_player.id != msg.id:
+                with contextlib.suppress(Exception):
+                    await old_player.delete()
+                    
+            await self.inline.form(message=msg, text=self._format_now(chat_id), reply_markup=self._get_player_buttons(chat_id))
+            self._player_msgs[chat_id] = msg
+        except Exception as e:
+            await utils.answer(msg, self.strings("error").format(err=str(e)))
+
+    @loader.command(ru_doc="[чат] - Показать текущий трек и инлайн-пульт")
+    async def vnow(self, message: Message):
+        chat_id = await self._resolve_target(message)
+        if chat_id not in self._current:
+            return await utils.answer(message, self.strings("empty_queue"))
+            
+        old_player = self._player_msgs.get(chat_id)
+        if old_player:
+            with contextlib.suppress(Exception):
+                await old_player.delete()
+                
+        msg = await utils.answer(message, self._format_now(chat_id))
+        await self.inline.form(message=msg, text=self._format_now(chat_id), reply_markup=self._get_player_buttons(chat_id))
+        self._player_msgs[chat_id] = msg
+
+    @loader.command(ru_doc="[чат] - Включить или выключить повтор (зацикливание)")
+    async def vloop(self, message: Message):
+        chat_id = await self._resolve_target(message)
+        state = not self._repeat.get(chat_id, False)
+        self._repeat[chat_id] = state
+        
+        old_player = self._player_msgs.get(chat_id)
+        if old_player:
+            with contextlib.suppress(Exception):
+                await self.inline.form(message=old_player, text=self._format_now(chat_id), reply_markup=self._get_player_buttons(chat_id))
+                
+        await utils.answer(message, self.strings("repeat_on") if state else self.strings("repeat_off"))
+
+    @loader.command(ru_doc="[чат] - Пауза/Продолжить воспроизведение")
+    async def vpause(self, message: Message):
+        chat_id = await self._resolve_target(message)
+        if chat_id not in self._current: return await utils.answer(message, self.strings("not_joined"))
+        is_paused = self._paused.get(chat_id, False)
+        if self._tgcalls:
+            func = getattr(self._tgcalls, "resume" if is_paused else "pause")
+            await func(chat_id)
+        self._paused[chat_id] = not is_paused
+        
+        old_player = self._player_msgs.get(chat_id)
+        if old_player:
+            with contextlib.suppress(Exception):
+                await self.inline.form(message=old_player, text=self._format_now(chat_id), reply_markup=self._get_player_buttons(chat_id))
+                
+        await utils.answer(message, self.strings("resumed") if is_paused else self.strings("paused"))
+
+    @loader.command(ru_doc="[чат] - Заглушить/Включить бота")
+    async def vmute(self, message: Message):
+        chat_id = await self._resolve_target(message)
+        if chat_id not in self._current: return await utils.answer(message, self.strings("not_joined"))
+        is_muted = self._muted.get(chat_id, False)
+        if self._tgcalls:
+            func = getattr(self._tgcalls, "unmute" if is_muted else "mute")
+            await func(chat_id)
+        self._muted[chat_id] = not is_muted
+        
+        old_player = self._player_msgs.get(chat_id)
+        if old_player:
+            with contextlib.suppress(Exception):
+                await self.inline.form(message=old_player, text=self._format_now(chat_id), reply_markup=self._get_player_buttons(chat_id))
+                
+        await utils.answer(message, self.strings("unmuted" if is_muted else "muted"))
+
+    @loader.command(ru_doc="[чат] - Подключиться к чату без звука")
+    async def vjoin(self, message: Message):
+        chat_id = await self._resolve_target(message)
+        if self._tgcalls:
+            silence_path = os.path.join(self._temp_dir, "silence.wav")
+            if not os.path.exists(silence_path):
+                with open(silence_path, "wb") as f: f.write(b"\x00" * 192000)
+            try:
+                stream = MediaStreamClass(silence_path) if MediaStreamClass else silence_path
+                if hasattr(self._tgcalls, "play"): await self._tgcalls.play(chat_id, stream)
+                else: await self._tgcalls.join_group_call(chat_id, stream)
+                await utils.answer(message, self.strings("joined"))
+            except Exception as e:
+                await utils.answer(message, self.strings("error").format(err=str(e)))
+
+    @loader.command(ru_doc="[чат] - Покинуть голосовой чат")
+    async def vleave(self, message: Message):
+        chat_id = await self._resolve_target(message)
+        await self._leave_call(chat_id)
+        await utils.answer(message, self.strings("left"))
