@@ -7,7 +7,7 @@
 # meta license: AGPL-3.0
 # scope: heroku
 # packages: ffmpeg
-# requires: yt-dlp py-tgcalls==2.3.3
+# requires: yt-dlp py-tgcalls==1.1.6
 
 __version__ = (1, 1, 0)
 
@@ -131,7 +131,7 @@ class VoiceModRemake(loader.Module):
         self._muted: Dict[int, bool] = {}
         self._paused: Dict[int, bool] = {}
         self._repeat: Dict[int, bool] = {}
-        self._speed: Dict[int, float] = {}
+        self._speed: Dict[int, float] = {}  # Храним скорость числом (например, 1.0, 1.25, 0.8)
         self._player_msgs: Dict[int, Message] = {}
         self._timers: Dict[int, asyncio.Task] = {}
         self._tgcalls: Any = None
@@ -215,6 +215,7 @@ class VoiceModRemake(loader.Module):
         ext = "mp4" if is_video else "mp3"
         out_file = os.path.join(self._temp_dir, f"fx_{speed}_{uuid.uuid4().hex[:8]}.{ext}")
         
+        # Математический расчет PTS для видео и atempo для звука с абсолютной синхронизацией
         v_pts = f"{1.0 / speed:.5f}"
         a_filter = f"atempo={speed}"
 
@@ -423,7 +424,7 @@ class VoiceModRemake(loader.Module):
 
     async def _cb_change_speed(self, call: InlineCall, chat_id: int, delta: float):
         curr_speed = self._speed.get(chat_id, 1.0)
-        new_speed = round(max(0.5, min(2.5, curr_speed + delta)), 2)
+        new_speed = round(max(0.5, min(2.5, curr_speed + delta)), 2) # Ограничение от 0.5x до 2.5x
         if new_speed == curr_speed:
             return
             
