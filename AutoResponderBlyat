@@ -1,7 +1,7 @@
 # meta developer: @remiuc
 # meta banner: https://github.com/Remiuc0ff/ii-bot-tupa/blob/main/1794942621637.jpg?raw=true
-# scope: hikka_only
-# scope: hikka_min 1.6.0
+# scope: hikka_heroku
+# scope: hikka_min 1.0.0
 
 import time
 import datetime
@@ -14,7 +14,7 @@ from .. import loader, utils
 
 @loader.tds
 class AutoResponderMod(loader.Module):
-    """Умный автоответчик по графику работы из профиля с поддержкой премиум-эмодзи и превью"""
+    """Умный автоответчик по графику работы из профиля с поддержкой премиум-эмодзи"""
 
     strings = {
         "name": "AutoResponder",
@@ -49,12 +49,6 @@ class AutoResponderMod(loader.Module):
                 True,
                 "Включить или выключить работу модуля",
                 validator=loader.validators.Boolean(),
-            ),
-            loader.ConfigValue(
-                "banner_url",
-                "https://github.com/Remiuc0ff/ii-bot-tupa/blob/main/1794942621637.jpg?raw=true",
-                "Ссылка на картинку/превью для автоответчика (оставьте пустым, чтобы отправлять только текст)",
-                validator=loader.validators.String(),
             ),
             loader.ConfigValue(
                 "template",
@@ -286,28 +280,6 @@ class AutoResponderMod(loader.Module):
             e_time=self.config["emoji_time"],
         )
 
-    async def _send_auto_reply(self, message: Message, text: str, is_command: bool = False):
-        banner = self.config["banner_url"].strip()
-        if banner:
-            try:
-                if is_command:
-                    await utils.answer_file(message, banner, caption=text)
-                else:
-                    await self._client.send_file(
-                        message.chat_id,
-                        file=banner,
-                        caption=text,
-                        reply_to=message.id,
-                    )
-                return
-            except Exception:
-                pass
-
-        if is_command:
-            await utils.answer(message, text)
-        else:
-            await message.reply(text)
-
     @loader.command(ru_doc="[status] — Включить/выключить автоответчик или проверить статус")
     async def away(self, message: Message):
         """Включить/выключить автоответчик или проверить текущий статус графика (.away status)"""
@@ -346,7 +318,7 @@ class AutoResponderMod(loader.Module):
         """Предпросмотр сообщения автоответчика прямо сейчас"""
         self._cache = None
         info = await self._analyze_schedule()
-        await self._send_auto_reply(message, self._build_response(info), is_command=True)
+        await utils.answer(message, self._build_response(info))
 
     @loader.command(ru_doc="Принудительно включить/выключить режим «Оффлайн» вне зависимости от графика")
     async def awayforce(self, message: Message):
@@ -454,4 +426,4 @@ class AutoResponderMod(loader.Module):
             return
 
         self._add_replied_user(message.sender_id)
-        await self._send_auto_reply(message, self._build_response(info), is_command=False)
+        await message.reply(self._build_response(info), link_preview=False)
