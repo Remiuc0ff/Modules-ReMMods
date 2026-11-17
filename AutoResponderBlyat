@@ -1,0 +1,432 @@
+# meta developer: @remiuc
+# scope: hikka_only
+# scope: hikka_min 1.6.0
+
+import time
+import datetime
+import re
+from zoneinfo import ZoneInfo
+from hikkatl.types import Message
+from hikkatl.tl.functions.users import GetFullUserRequest
+from .. import loader, utils
+
+
+@loader.tds
+class AutoResponderMod(loader.Module):
+    """Умный автоответчик по графику работы из профиля с поддержкой премиум-эмодзи"""
+
+    strings = {
+        "name": "AutoResponder",
+        "toggle_on": "<emoji document_id=5409234309691244951>✅</emoji> <b>Автоответчик по графику включен.</b>",
+        "toggle_off": "<emoji document_id=5408830797513784663>🚫</emoji> <b>Автоответчик выключен.</b>",
+        "status_info": (
+            "<emoji document_id=5411236022149219263>⚙️</emoji> <b>Состояние модуля:</b> {active}\n"
+            "<emoji document_id=5411496292872388950>⌚️</emoji> <b>Статус по графику:</b> {sched_status}\n"
+            "<emoji document_id=5409117246062625941>⚙️</emoji> <b>Принудительный оффлайн:</b> {force_status}\n"
+            "<emoji document_id=5332688668102525212>⌛</emoji> <b>До открытия:</b> <code>{remaining}</code>\n"
+            "<emoji document_id=5408862764955373206>🫂</emoji> <b>Отвечено за смену:</b> <code>{replied_count}</code> чел.\n\n"
+            "<b>Текущий график:</b>\n<blockquote expandable>{schedule}</blockquote>"
+        ),
+        "no_schedule": "Не указан в профиле",
+        "soon": "Совсем скоро",
+        "closed_now": "Закрыто (Оффлайн)",
+        "open_now": "Открыто (В сети)",
+        "ignored_add": "<emoji document_id=5409003906170651374>🔇</emoji> Пользователь <b>{name}</b> (<code>{uid}</code>) добавлен в белый список (игнор автоответчика).",
+        "ignored_rem": "<emoji document_id=5408901642999335517>🔔</emoji> Пользователь <b>{name}</b> (<code>{uid}</code>) удален из белого списка.",
+        "ignore_list": "<emoji document_id=5332510792031959942>📄</emoji> <b>Белый список (кому бот НЕ отвечает):</b>\n{users}",
+        "ignore_empty": "<emoji document_id=5332510792031959942>📄</emoji> <b>Белый список пуст.</b>",
+        "cache_cleared": "<emoji document_id=5404857686477015710>🔄</emoji> <b>Кэш графика и список отвеченных пользователей успешно сброшены!</b>",
+        "force_on": "<emoji document_id=5332500900722278433>💤</emoji> <b>Принудительный режим «Оффлайн» включен.</b>\nБот будет отвечать всем, даже если по графику сейчас открыто.",
+        "force_off": "<emoji document_id=5332420434509988397>🟢</emoji> <b>Принудительный режим выключен.</b>\nБот снова работает строго по вашему графику.",
+        "no_user": "<emoji document_id=5409235172979672859>⚠️</emoji> <b>Укажите пользователя (ответом на сообщение, в ЛС или по ID/тегу).</b>",
+    }
+
+    def __init__(self):
+        self.config = loader.ModuleConfig(
+            loader.ConfigValue(
+                "enabled",
+                True,
+                "Включить или выключить работу модуля",
+                validator=loader.validators.Boolean(),
+            ),
+            loader.ConfigValue(
+                "template",
+                (
+                    "{e_head} <b>Автоответчик:</b> в данный момент сообщение не может быть прочитано.\n"
+                    "{e_work} <b>Рабочие часы:</b>\n<blockquote expandable>{график}</blockquote>\n"
+                    "{e_status} <b>Статус:</b> Оффлайн\n"
+                    "{e_time} <b>Появлюсь в сети через:</b> <code>{осталось_времени}</code>"
+                ),
+                "Шаблон текста автоответчика. Доступные переменные: {график}, {осталось_времени}, {e_head}, {e_work}, {e_status}, {e_time}",
+                validator=loader.validators.String(),
+            ),
+            loader.ConfigValue(
+                "emoji_head",
+                "<emoji document_id=5408901642999335517>🔔</emoji>",
+                "Премиум-эмодзи для 1-й строки (Автоответчик)",
+                validator=loader.validators.String(),
+            ),
+            loader.ConfigValue(
+                "emoji_work",
+                "<emoji document_id=5411496292872388950>⌚️</emoji>",
+                "Премиум-эмодзи для 2-й строки (Рабочие часы)",
+                validator=loader.validators.String(),
+            ),
+            loader.ConfigValue(
+                "emoji_status",
+                "<emoji document_id=5332500900722278433>💤</emoji>",
+                "Премиум-эмодзи для 3-й строки (Статус)",
+                validator=loader.validators.String(),
+            ),
+            loader.ConfigValue(
+                "emoji_time",
+                "<emoji document_id=5332688668102525212>⌛</emoji>",
+                "Премиум-эмодзи для 4-й строки (Появлюсь через)",
+                validator=loader.validators.String(),
+            ),
+            loader.ConfigValue(
+                "fallback_hours",
+                "09:00-21:00",
+                "Резервные рабочие часы (ЧЧ:ММ-ЧЧ:ММ), если в профиле не настроены часы работы Telegram Business и нет времени в О себе",
+                validator=loader.validators.String(),
+            ),
+        )
+        self._cache = None
+        self._cache_ts = 0
+
+    async def client_ready(self, client, db):
+        self._client = client
+        self._db = db
+        self._me = await client.get_me()
+
+    def _get_replied_users(self) -> list:
+        return self._db.get("AutoResponder", "replied_users", [])
+
+    def _add_replied_user(self, user_id: int):
+        users = self._get_replied_users()
+        if user_id not in users:
+            users.append(user_id)
+            self._db.set("AutoResponder", "replied_users", users)
+
+    def _remove_replied_user(self, user_id: int):
+        users = self._get_replied_users()
+        if user_id in users:
+            users.remove(user_id)
+            self._db.set("AutoResponder", "replied_users", users)
+
+    def _clear_replied_users(self):
+        self._db.set("AutoResponder", "replied_users", [])
+
+    def _get_whitelist(self) -> list:
+        return self._db.get("AutoResponder", "whitelist", [])
+
+    def _fmt_min(self, m: int) -> str:
+        return f"{m // 60:02d}:{m % 60:02d}"
+
+    def _fmt_seconds(self, seconds: int) -> str:
+        if seconds <= 0:
+            return self.strings["soon"]
+        days, rem = divmod(seconds, 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes, _ = divmod(rem, 60)
+        parts = []
+        if days > 0:
+            parts.append(f"{days} д.")
+        if hours > 0:
+            parts.append(f"{hours} ч.")
+        if minutes > 0:
+            parts.append(f"{minutes} мин.")
+        return " ".join(parts) if parts else "менее 1 мин."
+
+    async def _analyze_schedule(self) -> dict:
+        """Проверяет график из профиля (Telegram Business или Bio)"""
+        now_ts = time.time()
+        if self._cache and (now_ts - self._cache_ts < 60):
+            return self._cache
+
+        try:
+            full = await self._client(GetFullUserRequest(self._me.id))
+            full_user = full.full_user
+        except Exception:
+            full_user = None
+
+        b_hours = getattr(full_user, "business_work_hours", None) if full_user else None
+        if b_hours and getattr(b_hours, "weekly_open", None):
+            tz_name = getattr(b_hours, "timezone_id", None)
+            try:
+                tz = ZoneInfo(tz_name) if tz_name else datetime.datetime.now().astimezone().tzinfo
+            except Exception:
+                tz = datetime.datetime.now().astimezone().tzinfo
+
+            now_dt = datetime.datetime.now(tz)
+            cur_week_min = now_dt.weekday() * 1440 + now_dt.hour * 60 + now_dt.minute
+            cur_sec = now_dt.second
+
+            days_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+            day_intervals = {i: [] for i in range(7)}
+            raw_intervals = []
+
+            for interval in b_hours.weekly_open:
+                s_min = interval.start_minute
+                e_min = interval.end_minute
+                raw_intervals.append((s_min, e_min))
+
+                d_idx = (s_min // 1440) % 7
+                s_day_m = s_min % 1440
+                e_day_m = e_min % 1440
+                end_label = "24:00" if (e_day_m == 0 and e_min > s_min) else self._fmt_min(e_day_m)
+                day_intervals[d_idx].append(f"{self._fmt_min(s_day_m)}–{end_label}")
+
+            lines = []
+            for idx in range(7):
+                t_str = ", ".join(day_intervals[idx]) if day_intervals[idx] else "Закрыто"
+                lines.append(f"<b>{days_names[idx]}:</b> {t_str}")
+            schedule_text = "\n".join(lines)
+
+            is_open = False
+            for s_min, e_min in raw_intervals:
+                if s_min <= cur_week_min < e_min:
+                    is_open = True
+                    break
+                if e_min > 10080 and cur_week_min < (e_min - 10080):
+                    is_open = True
+                    break
+
+            if is_open:
+                res = {
+                    "is_closed": False,
+                    "schedule_text": schedule_text,
+                    "remaining_str": "В сети",
+                }
+                self._cache = res
+                self._cache_ts = now_ts
+                return res
+
+            min_wait_minutes = None
+            for s_min, _ in raw_intervals:
+                diff = s_min - cur_week_min
+                if diff <= 0:
+                    diff += 10080
+                if min_wait_minutes is None or diff < min_wait_minutes:
+                    min_wait_minutes = diff
+
+            wait_seconds = (min_wait_minutes * 60 - cur_sec) if min_wait_minutes else 0
+            res = {
+                "is_closed": True,
+                "schedule_text": schedule_text,
+                "remaining_str": self._fmt_seconds(wait_seconds),
+            }
+            self._cache = res
+            self._cache_ts = now_ts
+            return res
+
+        bio = getattr(full_user, "about", "") if full_user else ""
+        schedule_text = utils.escape_html(bio) if bio else self.config["fallback_hours"]
+
+        match = re.search(r"(\d{1,2}):(\d{2})\s*[-–—]\s*(\d{1,2}):(\d{2})", bio or "")
+        if not match:
+            match = re.search(
+                r"(\d{1,2}):(\d{2})\s*[-–—]\s*(\d{1,2}):(\d{2})",
+                self.config["fallback_hours"],
+            )
+
+        if match:
+            sh, sm, eh, em = map(int, match.groups())
+            now_dt = datetime.datetime.now()
+            cur_m = now_dt.hour * 60 + now_dt.minute
+            start_m = sh * 60 + sm
+            end_m = eh * 60 + em
+
+            if start_m <= end_m:
+                is_open = start_m <= cur_m < end_m
+            else:
+                is_open = cur_m >= start_m or cur_m < end_m
+
+            if not is_open:
+                target_dt = now_dt.replace(hour=sh, minute=sm, second=0, microsecond=0)
+                if target_dt <= now_dt:
+                    target_dt += datetime.timedelta(days=1)
+                wait_seconds = int((target_dt - now_dt).total_seconds())
+                remaining_str = self._fmt_seconds(wait_seconds)
+            else:
+                remaining_str = "В сети"
+
+            res = {
+                "is_closed": not is_open,
+                "schedule_text": schedule_text,
+                "remaining_str": remaining_str,
+            }
+            self._cache = res
+            self._cache_ts = now_ts
+            return res
+
+        res = {
+            "is_closed": False,
+            "schedule_text": schedule_text or self.strings["no_schedule"],
+            "remaining_str": self.strings["soon"],
+        }
+        self._cache = res
+        self._cache_ts = now_ts
+        return res
+
+    def _build_response(self, info: dict) -> str:
+        return self.config["template"].format(
+            график=info["schedule_text"],
+            осталось_времени=info["remaining_str"],
+            e_head=self.config["emoji_head"],
+            e_work=self.config["emoji_work"],
+            e_status=self.config["emoji_status"],
+            e_time=self.config["emoji_time"],
+        )
+
+    @loader.command(ru_doc="[status] — Включить/выключить автоответчик или проверить статус")
+    async def away(self, message: Message):
+        """Включить/выключить автоответчик или проверить текущий статус графика (.away status)"""
+        args = utils.get_args_raw(message).lower().strip()
+
+        if args in ("status", "статус", "info"):
+            self._cache = None
+            info = await self._analyze_schedule()
+            active_str = "Включен" if self.config["enabled"] else "Выключен"
+            sched_str = self.strings["closed_now"] if info["is_closed"] else self.strings["open_now"]
+            force_str = "Да" if self._db.get("AutoResponder", "force_offline", False) else "Нет"
+            replied_cnt = len(self._get_replied_users())
+            await utils.answer(
+                message,
+                self.strings["status_info"].format(
+                    active=active_str,
+                    sched_status=sched_str,
+                    force_status=force_str,
+                    remaining=info["remaining_str"],
+                    replied_count=replied_cnt,
+                    schedule=info["schedule_text"],
+                ),
+            )
+            return
+
+        new_state = not self.config["enabled"]
+        self.config["enabled"] = new_state
+        if not new_state:
+            self._clear_replied_users()
+            await utils.answer(message, self.strings["toggle_off"])
+        else:
+            await utils.answer(message, self.strings["toggle_on"])
+
+    @loader.command(ru_doc="Посмотреть предпросмотр того, как выглядит сообщение автоответчика")
+    async def awaytest(self, message: Message):
+        """Предпросмотр сообщения автоответчика прямо сейчас"""
+        self._cache = None
+        info = await self._analyze_schedule()
+        await utils.answer(message, self._build_response(info))
+
+    @loader.command(ru_doc="Принудительно включить/выключить режим «Оффлайн» вне зависимости от графика")
+    async def awayforce(self, message: Message):
+        """Принудительный режим Оффлайн (если вы отошли в рабочее время)"""
+        curr = self._db.get("AutoResponder", "force_offline", False)
+        new_val = not curr
+        self._db.set("AutoResponder", "force_offline", new_val)
+        if new_val:
+            await utils.answer(message, self.strings["force_on"])
+        else:
+            self._clear_replied_users()
+            await utils.answer(message, self.strings["force_off"])
+
+    @loader.command(ru_doc="[пользователь/реплай/list] — Добавить или убрать человека из белого списка (игнора)")
+    async def awayignore(self, message: Message):
+        """Управление белым списком: кому автоответчик никогда не будет отвечать"""
+        args = utils.get_args_raw(message).strip()
+        whitelist = self._get_whitelist()
+
+        if args.lower() in ("list", "список"):
+            if not whitelist:
+                await utils.answer(message, self.strings["ignore_empty"])
+                return
+            lines = []
+            for uid in whitelist:
+                try:
+                    ent = await self._client.get_entity(uid)
+                    name = utils.escape_html(getattr(ent, "first_name", str(uid)))
+                except Exception:
+                    name = str(uid)
+                lines.append(f"• <a href='tg://user?id={uid}'>{name}</a> (<code>{uid}</code>)")
+            await utils.answer(message, self.strings["ignore_list"].format(users="\n".join(lines)))
+            return
+
+        user_id = None
+        user_name = "Пользователь"
+
+        if message.is_reply:
+            reply = await message.get_reply_message()
+            if reply and reply.sender_id:
+                user_id = reply.sender_id
+                sender = await reply.get_sender()
+                user_name = utils.escape_html(getattr(sender, "first_name", str(user_id)))
+        elif args:
+            try:
+                ent = await self._client.get_entity(int(args) if args.isdigit() else args)
+                user_id = ent.id
+                user_name = utils.escape_html(getattr(ent, "first_name", str(user_id)))
+            except Exception:
+                pass
+        elif message.is_private:
+            user_id = message.chat_id
+            chat = await message.get_chat()
+            user_name = utils.escape_html(getattr(chat, "first_name", str(user_id)))
+
+        if not user_id:
+            await utils.answer(message, self.strings["no_user"])
+            return
+
+        if user_id in whitelist:
+            whitelist.remove(user_id)
+            self._db.set("AutoResponder", "whitelist", whitelist)
+            await utils.answer(message, self.strings["ignored_rem"].format(name=user_name, uid=user_id))
+        else:
+            whitelist.append(user_id)
+            self._db.set("AutoResponder", "whitelist", whitelist)
+            await utils.answer(message, self.strings["ignored_add"].format(name=user_name, uid=user_id))
+
+    @loader.command(ru_doc="Сбросить список тех, кому бот уже ответил, и обновить кэш графика из профиля")
+    async def awayreset(self, message: Message):
+        """Сбросить список отвеченных пользователей и принудительно обновить график"""
+        self._cache = None
+        self._clear_replied_users()
+        await utils.answer(message, self.strings["cache_cleared"])
+
+    @loader.watcher(only_pm=True, only_messages=True)
+    async def watcher(self, message: Message):
+        if not self.config["enabled"]:
+            return
+
+        # Если вы сами написали собеседнику в ЛС — сбрасываем его из списка отвеченных
+        if message.out:
+            self._remove_replied_user(message.chat_id)
+            return
+
+        if message.sender_id == self._me.id:
+            return
+
+        # Проверяем белый список (игнор)
+        if message.sender_id in self._get_whitelist():
+            return
+
+        sender = await message.get_sender()
+        if not sender or getattr(sender, "bot", False) or getattr(sender, "verified", False):
+            return
+
+        info = await self._analyze_schedule()
+        force_offline = self._db.get("AutoResponder", "force_offline", False)
+
+        # Если по графику "Открыто" и не включен принудительный режим — молчим
+        if not info["is_closed"] and not force_offline:
+            if self._get_replied_users():
+                self._clear_replied_users()
+            return
+
+        # Отвечаем строго 1 раз за период закрытия/диалога
+        replied_users = self._get_replied_users()
+        if message.sender_id in replied_users:
+            return
+
+        self._add_replied_user(message.sender_id)
+        await message.reply(self._build_response(info))
